@@ -15,6 +15,7 @@
  */
 
 #include "config_console.h"
+#include "audio_processor.h"
 #include "sdkconfig.h"
 
 #include "esp_console.h"
@@ -143,6 +144,8 @@ static int cmd_show(int argc, char **argv)
 #endif
 #if defined(CONFIG_BATEAR_ROLE_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIRED_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
             print_nvs_u8(h, "device_id", "device_id");
+            print_nvs_u8(h, "sensitivity", "sensitivity");
+            print_nvs_u8(h, "mic_gain", "mic_gain");
 #endif
 #if defined(CONFIG_BATEAR_ROLE_DETECTOR) || defined(CONFIG_BATEAR_ROLE_GATEWAY)
             print_nvs_u32(h, "lora_freq", "lora_freq", "kHz");
@@ -161,7 +164,10 @@ static int cmd_show(int argc, char **argv)
     printf("    net_key    = %s\n", CONFIG_BATEAR_NET_KEY);
 #endif
 #if defined(CONFIG_BATEAR_ROLE_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIRED_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
-    printf("    device_id  = %d\n", CONFIG_BATEAR_DEVICE_ID);
+    printf("    device_id   = %d\n", CONFIG_BATEAR_DEVICE_ID);
+    printf("    sensitivity = %d  (active, 1=Strict .. 5=Max)\n", audio_processor_get_sensitivity());
+    printf("    mic_gain    = %.0fx (active, 4x=+12dB for ICS-43434, 1x=0dB for INMP441)\n",
+           (double)audio_processor_get_gain());
 #endif
 #ifdef CONFIG_BATEAR_LORA_FREQ
     printf("    lora_freq  = %d kHz\n", CONFIG_BATEAR_LORA_FREQ);
@@ -364,6 +370,8 @@ static int cmd_set(int argc, char **argv)
 #endif
 #if defined(CONFIG_BATEAR_ROLE_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIRED_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
         printf("  device_id   — 0-255\n");
+        printf("  sensitivity — 1..5 (1=Strict, 3=Balanced [default], 5=Max; applies immediately)\n");
+        printf("  mic_gain    — 1..32 (digital pre-gain; 4=ICS-43434 [default], 1..2=INMP441)\n");
 #endif
 #if defined(CONFIG_BATEAR_ROLE_GATEWAY) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
         printf("  wifi_ssid   — Wi-Fi SSID\n");
@@ -431,6 +439,24 @@ static int cmd_set(int argc, char **argv)
             return 1;
         }
         return set_nvs_u8("lora_cfg", "device_id", (uint8_t)id);
+    }
+    if (strcmp(key, "sensitivity") == 0) {
+        int lvl = atoi(value);
+        if (lvl < 1 || lvl > 5) {
+            printf("Error: sensitivity must be 1..5 (1=Strict, 3=Balanced, 5=Max)\n");
+            return 1;
+        }
+        audio_processor_set_sensitivity(lvl);
+        return set_nvs_u8("lora_cfg", "sensitivity", (uint8_t)lvl);
+    }
+    if (strcmp(key, "mic_gain") == 0) {
+        int g = atoi(value);
+        if (g < 1 || g > 32) {
+            printf("Error: mic_gain must be 1..32 (4=ICS-43434 default, 1..2=INMP441)\n");
+            return 1;
+        }
+        audio_processor_set_gain((float)g);
+        return set_nvs_u8("lora_cfg", "mic_gain", (uint8_t)g);
     }
 #endif
 

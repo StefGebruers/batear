@@ -80,6 +80,15 @@ float        audio_processor_last_rms(void);
 bool analyze_harmonics(const float *psd, int n_bins_half, float f0_min_hz, float f0_max_hz,
                        HarmonicAnalysisResult *out);
 
+/**
+ * Configure detector sensitivity level (1 = Low/Strict .. 5 = Max, default 3 = Balanced)
+ * and digital microphone pre-gain (1..16x, default 4x = +12 dB for ICS-43434).
+ */
+void  audio_processor_set_sensitivity(int level);
+int   audio_processor_get_sensitivity(void);
+void  audio_processor_set_gain(float gain);
+float audio_processor_get_gain(void);
+
 #ifdef __cplusplus
 }
 #endif

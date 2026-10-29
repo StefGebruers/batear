@@ -16,6 +16,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/i2s_std.h"
+#include "nvs.h"
 #include "sdkconfig.h"
 
 #if CONFIG_BATEAR_ROLE_WIRED_DETECTOR
@@ -33,15 +34,15 @@ static const char *TAG = "audio";
 #define HOP_MS              100
 
 /* Fundamental search band (Hz); 3×f0 must stay below Nyquist (8 kHz). */
-#define HARM_F0_MIN_HZ      180.f
+#define HARM_F0_MIN_HZ      110.f
 #define HARM_F0_MAX_HZ      2400.f
 
-#define EMA_ALPHA           0.25f
+#define EMA_ALPHA           0.30f
 #define CONF_ON             0.30f
 #define CONF_OFF            0.18f
-#define SUSTAIN_FRAMES_ON   2
+#define SUSTAIN_FRAMES_ON   3
 #define SUSTAIN_FRAMES_OFF  8
-#define RMS_MIN             0.0004f
+#define RMS_MIN             0.00025f
 
 static float __attribute__((aligned(16))) s_fft_work[2 * FRAME_SAMPLES];
 static int32_t __attribute__((aligned(16))) s_raw[FRAME_SAMPLES];
@@ -197,6 +198,21 @@ void AudioTask(void *pvParameters)
     (void)pvParameters;
 
     ESP_LOGI(TAG, "AudioTask start (core %d) FFT N=%d", xPortGetCoreID(), FRAME_SAMPLES);
+
+    {
+        nvs_handle_t h;
+        if (nvs_open("lora_cfg", NVS_READONLY, &h) == ESP_OK) {
+            uint8_t sens = 3;
+            if (nvs_get_u8(h, "sensitivity", &sens) == ESP_OK) {
+                audio_processor_set_sensitivity((int)sens);
+            }
+            uint8_t gain = 4;
+            if (nvs_get_u8(h, "mic_gain", &gain) == ESP_OK) {
+                audio_processor_set_gain((float)gain);
+            }
+            nvs_close(h);
+        }
+    }
 
     esp_err_t err = audio_processor_init();
     if (err != ESP_OK) {
