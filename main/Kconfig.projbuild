@@ -29,6 +29,13 @@ choice BATEAR_ROLE
         help
             Detector that sends alerts directly over Ethernet/PoE
             via MQTT, bypassing the LoRa + Gateway path.
+
+    config BATEAR_ROLE_WIFI_DETECTOR
+        bool "Wi-Fi Detector (mic + Wi-Fi + MQTT + OLED)"
+        help
+            Detector that sends alerts directly over Wi-Fi via MQTT
+            to Home Assistant, bypassing the LoRa + Gateway path.
+            Ideal for testing or deploying on Heltec V3/V4 over Wi-Fi.
 endchoice
 
 config BATEAR_TELEMETRY_HEARTBEAT_MIN
@@ -51,7 +58,7 @@ config BATEAR_TELEMETRY_HEARTBEAT_MIN
 config BATEAR_AUDIO_PERF_LOG
     bool "Log DSP timing (FFT+PSD, harmonics, us min/max/avg every ~10s)"
     default n
-    depends on BATEAR_ROLE_DETECTOR || BATEAR_ROLE_WIRED_DETECTOR
+    depends on BATEAR_ROLE_DETECTOR || BATEAR_ROLE_WIRED_DETECTOR || BATEAR_ROLE_WIFI_DETECTOR
     help
         Uses esp_timer_get_time() around compute_psd and analyze_harmonics.
         Disable for production to reduce serial spam.
@@ -59,7 +66,7 @@ config BATEAR_AUDIO_PERF_LOG
 config BATEAR_AUDIO_DEBUG_LOG
     bool "Log per-frame detector state (rms / harm / confidence) every ~1 s"
     default n
-    depends on BATEAR_ROLE_DETECTOR || BATEAR_ROLE_WIRED_DETECTOR
+    depends on BATEAR_ROLE_DETECTOR || BATEAR_ROLE_WIRED_DETECTOR || BATEAR_ROLE_WIFI_DETECTOR
     help
         Throttled (~1 Hz) print of rms, harm_ok, confidence EMA, fundamental,
         harmonic ratios, SNR. Use to diagnose why the state machine isn't
@@ -68,7 +75,7 @@ config BATEAR_AUDIO_DEBUG_LOG
 config BATEAR_I2S_MIC_SLOT_RIGHT
     bool "I2S mic: take RIGHT channel (ICS-43434 L/R pin to VDD)"
     default n
-    depends on BATEAR_ROLE_DETECTOR || BATEAR_ROLE_WIRED_DETECTOR
+    depends on BATEAR_ROLE_DETECTOR || BATEAR_ROLE_WIRED_DETECTOR || BATEAR_ROLE_WIFI_DETECTOR
     help
         ICS-43434: L/R to GND = left, L/R to 3.3 V = right.
         On ESP32-S3, RX uses Philips BOTH slots; we deinterleave L/R in software.
@@ -77,7 +84,7 @@ config BATEAR_DEVICE_ID
     int "Device ID (0-255)"
     default 1
     range 0 255
-    depends on BATEAR_ROLE_DETECTOR || BATEAR_ROLE_WIRED_DETECTOR
+    depends on BATEAR_ROLE_DETECTOR || BATEAR_ROLE_WIRED_DETECTOR || BATEAR_ROLE_WIFI_DETECTOR
     help
         Unique identifier for this detector. The gateway displays
         which device triggered an alarm.
@@ -115,21 +122,21 @@ config BATEAR_LORA_SYNC_WORD
         0x34 = LoRaWAN. Pick any unused value for your network.
 
 menu "MQTT / Home Assistant"
-    depends on BATEAR_ROLE_GATEWAY || BATEAR_ROLE_WIRED_DETECTOR
+    depends on BATEAR_ROLE_GATEWAY || BATEAR_ROLE_WIRED_DETECTOR || BATEAR_ROLE_WIFI_DETECTOR
 
     config BATEAR_WIFI_SSID
         string "Wi-Fi SSID"
         default "MyNetwork"
-        depends on BATEAR_ROLE_GATEWAY
+        depends on BATEAR_ROLE_GATEWAY || BATEAR_ROLE_WIFI_DETECTOR
         help
-            Default Wi-Fi SSID. Overridden by NVS "gateway_cfg" → "wifi_ssid".
+            Default Wi-Fi SSID. Overridden by NVS → "wifi_ssid".
 
     config BATEAR_WIFI_PASS
         string "Wi-Fi password"
         default ""
-        depends on BATEAR_ROLE_GATEWAY
+        depends on BATEAR_ROLE_GATEWAY || BATEAR_ROLE_WIFI_DETECTOR
         help
-            Default Wi-Fi password. Overridden by NVS "gateway_cfg" → "wifi_pass".
+            Default Wi-Fi password. Overridden by NVS → "wifi_pass".
 
     config BATEAR_MQTT_BROKER_URL
         string "MQTT broker URL"
@@ -165,6 +172,14 @@ menu "MQTT / Home Assistant"
         help
             Short identifier used in MQTT topics: batear/nodes/<id>/status.
             Overridden by NVS "wired_cfg" → "device_id".
+
+    config BATEAR_WIFI_DEVICE_ID
+        string "Wi-Fi detector device ID (for MQTT topics)"
+        default "det01"
+        depends on BATEAR_ROLE_WIFI_DETECTOR
+        help
+            Short identifier used in MQTT topics: batear/nodes/<id>/status.
+            Overridden by NVS "wifi_det_cfg" → "device_id".
 
 endmenu
 
@@ -202,7 +217,7 @@ menu "Ethernet (static IP)"
 endmenu
 
 menu "REST API / OTA"
-    depends on BATEAR_ROLE_WIRED_DETECTOR
+    depends on BATEAR_ROLE_WIRED_DETECTOR || BATEAR_ROLE_WIFI_DETECTOR
 
     config BATEAR_HTTP_PORT
         int "HTTP server port"
