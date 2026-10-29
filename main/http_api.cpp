@@ -147,7 +147,7 @@ static esp_err_t handle_status(httpd_req_t *req)
     HttpDroneStatus_t st;
     get_status_snapshot(&st);
 
-    char json[256];
+    char json[320];
     snprintf(json, sizeof(json),
         "{"
             "\"drone_detected\":%s,"
@@ -155,6 +155,8 @@ static esp_err_t handle_status(httpd_req_t *req)
             "\"rms_db\":%u,"
             "\"f0_bin\":%u,"
             "\"confidence\":%.4f,"
+            "\"doa_deg\":%d,"
+            "\"doa_conf\":%.2f,"
             "\"timestamp\":%lld"
         "}",
         st.drone_detected ? "true" : "false",
@@ -162,6 +164,8 @@ static esp_err_t handle_status(httpd_req_t *req)
         (unsigned)st.rms_db,
         (unsigned)st.f0_bin,
         (double)st.confidence,
+        (int)st.doa_deg,
+        (double)st.doa_conf,
         (long long)st.timestamp);
 
     httpd_resp_set_type(req, "application/json");

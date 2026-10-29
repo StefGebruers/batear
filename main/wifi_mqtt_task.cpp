@@ -12,6 +12,7 @@
 #include "wifi_mqtt_task.h"
 #include "http_api.h"
 #include "audio_processor.h"
+#include "doa_processor.h"
 #include "drone_detector.h"
 #include "pin_config.h"
 #include "lorawan_provision.h"
@@ -140,7 +141,12 @@ static void hw_display_event(const DroneEvent_t *ev)
              (unsigned)rms_to_db(ev->rms), f0_hz);
     oled_print(0, 4, line);
 
-    snprintf(line, sizeof(line), "IP:%.15s", s_ip_str);
+    if (alarm && ev->doa_deg >= 0) {
+        snprintf(line, sizeof(line), "DoA:%d (%s)",
+                 (int)ev->doa_deg, doa_angle_to_cardinal(ev->doa_deg));
+    } else {
+        snprintf(line, sizeof(line), "IP:%.15s", s_ip_str);
+    }
     oled_print(0, 6, line);
     oled_flush();
 #endif
@@ -330,8 +336,53 @@ static void publish_ha_discovery(void)
 
     esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
 
+    /* DoA angle sensor (0..180 deg) */
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/batear_%s/doa_deg/config", s_device_id);
+
+    snprintf(payload, sizeof(payload),
+        "{"
+            "\"name\":\"Batear %s Direction (DoA)\","
+            "\"unique_id\":\"batear_%s_doa_deg\","
+            "\"unit_of_measurement\":\"°\","
+            "\"icon\":\"mdi:compass-outline\","
+            "\"state_topic\":\"%s\","
+            "\"value_template\":\"{{ value_json.doa_deg if value_json.doa_deg >= 0 else 'unknown' }}\","
+            "\"availability_topic\":\"%s\","
+            "\"payload_available\":\"online\","
+            "\"payload_not_available\":\"offline\","
+            "\"device\":{\"identifiers\":[\"batear_%s\"]}"
+        "}",
+        s_device_id, s_device_id,
+        s_topic_status, s_topic_avail,
+        s_device_id);
+
+    esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+
+    /* DoA cardinal direction text sensor */
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/batear_%s/doa_cardinal/config", s_device_id);
+
+    snprintf(payload, sizeof(payload),
+        "{"
+            "\"name\":\"Batear %s Richting\","
+            "\"unique_id\":\"batear_%s_doa_cardinal\","
+            "\"icon\":\"mdi:AxisArrow\","
+            "\"state_topic\":\"%s\","
+            "\"value_template\":\"{{ value_json.doa_cardinal }}\","
+            "\"availability_topic\":\"%s\","
+            "\"payload_available\":\"online\","
+            "\"payload_not_available\":\"offline\","
+            "\"device\":{\"identifiers\":[\"batear_%s\"]}"
+        "}",
+        s_device_id, s_device_id,
+        s_topic_status, s_topic_avail,
+        s_device_id);
+
+    esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+
     /* Initial idle state so Home Assistant entities initialize immediately */
-    char init_json[256];
+    char init_json[320];
     uint8_t det_id = lorawan_get_keys()->device_id;
     snprintf(init_json, sizeof(init_json),
         "{"
@@ -341,6 +392,8 @@ static void publish_ha_discovery(void)
             "\"f0_bin\":0,"
             "\"seq\":0,"
             "\"confidence\":0.0000,"
+            "\"doa_deg\":-1,"
+            "\"doa_cardinal\":\"N/A\","
             "\"timestamp\":0"
         "}",
         (unsigned)det_id);
@@ -437,6 +490,8 @@ extern "C" void WifiMqttTask(void *pvParameters)
                 .rms_db         = rms_to_db(ev.rms),
                 .f0_bin         = static_cast<uint16_t>(ev.f0_bin),
                 .confidence     = ev.peak_ratio,
+                .doa_deg        = ev.doa_deg,
+                .doa_conf       = ev.doa_conf,
                 .timestamp      = ts,
             };
             http_api_update_status(&hst);
@@ -454,6 +509,8 @@ extern "C" void WifiMqttTask(void *pvParameters)
                     "\"f0_bin\":%u,"
                     "\"seq\":%u,"
                     "\"confidence\":%.4f,"
+                    "\"doa_deg\":%d,"
+                    "\"doa_cardinal\":\"%s\","
                     "\"timestamp\":%lld"
                 "}",
                 (ev.type == DRONE_EVENT_ALARM) ? "true" : "false",
@@ -461,6 +518,8 @@ extern "C" void WifiMqttTask(void *pvParameters)
                 (unsigned)rms_to_db(ev.rms), (unsigned)ev.f0_bin,
                 (unsigned)tx_seq++,
                 (double)ev.peak_ratio,
+                (int)ev.doa_deg,
+                doa_angle_to_cardinal(ev.doa_deg),
                 (long long)ts);
 
             esp_mqtt_client_publish(s_mqtt, s_topic_status, json, 0, 1, 1);

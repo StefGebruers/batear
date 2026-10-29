@@ -7,7 +7,7 @@ else()
     set(W5500_COMPONENT "")
 endif()
 
-set(SRCS "wifi_mqtt_task.cpp" "main.cpp" "lorawan_provision.c" "config_console.c")
+set(SRCS "doa_processor.c" "wifi_mqtt_task.cpp" "main.cpp" "lorawan_provision.c" "config_console.c")
 
 # RadioLib HAL only needed for LoRa roles
 if(CONFIG_BATEAR_ROLE_DETECTOR OR CONFIG_BATEAR_ROLE_GATEWAY)

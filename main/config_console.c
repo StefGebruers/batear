@@ -16,6 +16,7 @@
 
 #include "config_console.h"
 #include "audio_processor.h"
+#include "doa_processor.h"
 #include "sdkconfig.h"
 
 #include "esp_console.h"
@@ -166,8 +167,10 @@ static int cmd_show(int argc, char **argv)
 #if defined(CONFIG_BATEAR_ROLE_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIRED_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
     printf("    device_id   = %d\n", CONFIG_BATEAR_DEVICE_ID);
     printf("    sensitivity = %d  (active, 1=Strict .. 5=Max)\n", audio_processor_get_sensitivity());
-    printf("    mic_gain    = %.0fx (active, 4x=+12dB for ICS-43434, 1x=0dB for INMP441)\n",
+    printf("    mic_gain    = %.0fx (active, 2x=+6dB default)\n",
            (double)audio_processor_get_gain());
+    printf("    mic_spacing = %.0f mm (active, distance between Left & Right mic)\n",
+           (double)doa_processor_get_spacing_mm());
 #endif
 #ifdef CONFIG_BATEAR_LORA_FREQ
     printf("    lora_freq  = %d kHz\n", CONFIG_BATEAR_LORA_FREQ);
@@ -372,6 +375,7 @@ static int cmd_set(int argc, char **argv)
         printf("  device_id   — 0-255\n");
         printf("  sensitivity — 1..5 (1=Strict, 3=Balanced [default], 5=Max; applies immediately)\n");
         printf("  mic_gain    — 1..32 (digital pre-gain; 2=default; applies immediately)\n");
+        printf("  mic_spacing — 20..500 (distance between 2 mics in mm; default 100; applies immediately)\n");
         printf("  debug       — 0 or 1 (toggle 1Hz audio debug log; default 0=quiet)\n");
 #endif
 #if defined(CONFIG_BATEAR_ROLE_GATEWAY) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
@@ -458,6 +462,22 @@ static int cmd_set(int argc, char **argv)
         }
         audio_processor_set_gain((float)g);
         return set_nvs_u8("lora_cfg", "mic_gain", (uint8_t)g);
+    }
+    if (strcmp(key, "mic_spacing") == 0) {
+        int mm = atoi(value);
+        if (mm < 20 || mm > 500) {
+            printf("Error: mic_spacing must be 20..500 (in mm, e.g. 100 for 10 cm)\n");
+            return 1;
+        }
+        doa_processor_set_spacing_mm((float)mm);
+        nvs_handle_t h;
+        if (nvs_open("lora_cfg", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_u16(h, "mic_spacing", (uint16_t)mm);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        printf("OK: lora_cfg:mic_spacing = %d mm (applied immediately)\n", mm);
+        return 0;
     }
     if (strcmp(key, "debug") == 0) {
         int d = atoi(value);

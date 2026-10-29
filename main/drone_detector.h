@@ -28,6 +28,8 @@ typedef struct {
     float          peak_ratio;    /* harmonic confidence at the moment of transition */
     int            f0_bin;        /* fundamental bin index (or harm_ok flag)         */
     float          rms;           /* frame RMS at transition                  */
+    int16_t        doa_deg;       /* DoA azimuth in degrees (0..180, or -1 if N/A)   */
+    float          doa_conf;      /* DoA SRP-PHAT contrast confidence                */
     uint32_t       timestamp_ms;  /* xTaskGetTickCount() * portTICK_PERIOD_MS */
 } DroneEvent_t;
 
