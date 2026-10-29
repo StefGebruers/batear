@@ -11,6 +11,7 @@
 
 #include "wifi_mqtt_task.h"
 #include "http_api.h"
+#include "audio_processor.h"
 #include "drone_detector.h"
 #include "pin_config.h"
 #include "lorawan_provision.h"
@@ -126,20 +127,20 @@ static void hw_display_event(const DroneEvent_t *ev)
 #endif
 
 #if defined(PIN_OLED_SDA)
-    char line[24];
+    char line[48];
     oled_clear();
     oled_print(0, 0, alarm ? "!! DRONE ALARM !!" : "BATEAR WIFI DET");
 
-    snprintf(line, sizeof(line), "ID:%s %s", s_device_id,
+    snprintf(line, sizeof(line), "ID:%.8s %s", s_device_id,
              s_mqtt_connected ? "MQTT:OK" : "MQTT:--");
     oled_print(0, 2, line);
 
-    unsigned f0_hz = (unsigned)((ev->f0_bin * SAMPLE_RATE) / FFT_SIZE);
+    unsigned f0_hz = (unsigned)((ev->f0_bin * AUDIO_PROC_SAMPLE_RATE_HZ) / AUDIO_PROC_FFT_SIZE);
     snprintf(line, sizeof(line), "dB:%u F0:%uHz",
              (unsigned)rms_to_db(ev->rms), f0_hz);
     oled_print(0, 4, line);
 
-    snprintf(line, sizeof(line), "IP:%s", s_ip_str);
+    snprintf(line, sizeof(line), "IP:%.15s", s_ip_str);
     oled_print(0, 6, line);
     oled_flush();
 #endif
@@ -363,9 +364,9 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         esp_mqtt_client_publish(s_mqtt, s_topic_avail, "online", 0, 1, 1);
         publish_ha_discovery();
         {
-            char l2[24], l4[24];
-            snprintf(l2, sizeof(l2), "ID:%s MQTT:OK", s_device_id);
-            snprintf(l4, sizeof(l4), "IP:%s", s_ip_str);
+            char l2[48], l4[48];
+            snprintf(l2, sizeof(l2), "ID:%.8s MQTT:OK", s_device_id);
+            snprintf(l4, sizeof(l4), "IP:%.15s", s_ip_str);
             hw_display_status(l2, l4, "Listening (16kHz)");
         }
         break;
@@ -467,3 +468,4 @@ extern "C" void WifiMqttTask(void *pvParameters)
         }
     }
 }
+
