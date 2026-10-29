@@ -371,7 +371,8 @@ static int cmd_set(int argc, char **argv)
 #if defined(CONFIG_BATEAR_ROLE_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIRED_DETECTOR) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
         printf("  device_id   — 0-255\n");
         printf("  sensitivity — 1..5 (1=Strict, 3=Balanced [default], 5=Max; applies immediately)\n");
-        printf("  mic_gain    — 1..32 (digital pre-gain; 4=ICS-43434 [default], 1..2=INMP441)\n");
+        printf("  mic_gain    — 1..32 (digital pre-gain; 2=default; applies immediately)\n");
+        printf("  debug       — 0 or 1 (toggle 1Hz audio debug log; default 0=quiet)\n");
 #endif
 #if defined(CONFIG_BATEAR_ROLE_GATEWAY) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
         printf("  wifi_ssid   — Wi-Fi SSID\n");
@@ -452,11 +453,17 @@ static int cmd_set(int argc, char **argv)
     if (strcmp(key, "mic_gain") == 0) {
         int g = atoi(value);
         if (g < 1 || g > 32) {
-            printf("Error: mic_gain must be 1..32 (4=ICS-43434 default, 1..2=INMP441)\n");
+            printf("Error: mic_gain must be 1..32\n");
             return 1;
         }
         audio_processor_set_gain((float)g);
         return set_nvs_u8("lora_cfg", "mic_gain", (uint8_t)g);
+    }
+    if (strcmp(key, "debug") == 0) {
+        int d = atoi(value);
+        audio_processor_set_debug_log(d != 0);
+        printf("OK: audio 1Hz debug log = %s\n", (d != 0) ? "ON" : "OFF");
+        return 0;
     }
 #endif
 

@@ -19,32 +19,31 @@ static float __attribute__((aligned(16))) s_psd[AUDIO_PROC_PSD_BINS];
 static float s_last_rms;
 
 /* Runtime-tunable sensitivity (1=Strict .. 5=Max, default 3=Balanced)
- * and digital mic gain (default 4.0x = +12 dB to align ICS-43434 -38 dBFS with INMP441 -26 dBFS). */
+ * and digital mic gain (default 2.0x = +6 dB). */
 static int   s_sensitivity_level = 3;
-static float s_mic_gain          = 4.0f;
+static float s_mic_gain          = 2.0f;
+static bool  s_debug_log         = false;
 
 typedef struct {
-    float min_peak_snr;     /* Minimum fundamental SNR above noise floor */
+    float min_global_snr;   /* Minimum fundamental SNR above global noise floor */
+    float min_f0_local_snr; /* Minimum f0 peak prominence above immediate neighboring bins */
+    float min_h2_local_snr; /* Minimum 2*f0 peak prominence above its local neighboring bins */
+    float min_h3_local_snr; /* Minimum 3*f0 peak prominence above its local neighboring bins */
     float min_h2_ratio;     /* Minimum P(2*f0)/P(f0) */
     float min_h3_ratio;     /* Minimum P(3*f0)/P(f0) */
-    float min_harm_snr;     /* Minimum SNR of 2*f0 and 3*f0 above noise floor */
-    float min_valley_ratio; /* Anti-false-alarm: harmonic peak vs inter-harmonic valley (1.5*f0, 2.5*f0) */
     float snr_norm_scale;   /* Confidence normalization scale */
 } SensitivityProfile;
 
 /* Profiles 1..5:
- * - Level 1 (Strict):      Near original BatEar thresholds, only loud close sources
- * - Level 2 (Conservative): Moderate distance, very high noise immunity
- * - Level 3 (Balanced):    Default — good room-scale sensitivity + valley broadband rejection
- * - Level 4 (High):        High sensitivity for quieter/distant drones
- * - Level 5 (Max):         Maximum sensitivity for long-range testing
+ * Uses local narrowband SNR (peak vs bins [c-7..c-3, c+3..c+7]) so 1/f room noise
+ * and broadband noise NEVER trigger false alarms, while true tonal harmonics do.
  */
 static const SensitivityProfile s_profiles[5] = {
-    /* 1: Strict */       { 8.0f, 0.050f, 0.025f, 4.0f, 4.0f, 18.0f },
-    /* 2: Conservative */ { 6.0f, 0.020f, 0.008f, 3.0f, 3.2f, 12.0f },
-    /* 3: Balanced */     { 4.5f, 0.008f, 0.003f, 2.5f, 2.5f,  8.0f },
-    /* 4: High */         { 3.5f, 0.004f, 0.0015f, 2.0f, 2.0f, 6.0f },
-    /* 5: Max */          { 2.5f, 0.002f, 0.0008f, 1.6f, 1.6f, 4.5f },
+    /* 1: Strict (original-like) */ { 8.0f, 14.0f, 8.0f, 6.0f, 0.050f, 0.025f, 22.0f },
+    /* 2: Conservative */           { 6.0f, 10.0f, 6.0f, 4.5f, 0.025f, 0.010f, 16.0f },
+    /* 3: Balanced (default) */     { 4.5f,  7.5f, 4.5f, 3.5f, 0.012f, 0.005f, 12.0f },
+    /* 4: High */                   { 3.5f,  6.0f, 4.0f, 3.2f, 0.006f, 0.002f,  9.0f },
+    /* 5: Max */                    { 2.8f,  5.0f, 3.5f, 2.8f, 0.003f, 0.001f,  7.0f },
 };
 
 void audio_processor_set_sensitivity(int level)
@@ -74,13 +73,24 @@ float audio_processor_get_gain(void)
     return s_mic_gain;
 }
 
-/* --- Default weak noise floor: mean linear power above 75 Hz (bin 5) --- */
+void audio_processor_set_debug_log(bool enable)
+{
+    s_debug_log = enable;
+    ESP_LOGI(TAG, "Audio 1Hz debug log %s", s_debug_log ? "ENABLED" : "DISABLED");
+}
+
+bool audio_processor_get_debug_log(void)
+{
+    return s_debug_log;
+}
+
+/* --- Default weak noise floor: mean linear power above 90 Hz (bin 6) --- */
 __attribute__((weak)) float audio_processor_noise_floor_estimate(const float *psd, int n_bins_half)
 {
     if (n_bins_half < 8 || psd == NULL) {
         return 1e-18f;
     }
-    const int start_bin = 5; /* Skip DC & sub-75 Hz rumble */
+    const int start_bin = 6;
     double acc = 0.0;
     for (int i = start_bin; i < n_bins_half; i++) {
         acc += (double)psd[i];
@@ -237,39 +247,32 @@ static float local_peak_max(const float *psd, int n_bins, int center, int half_w
     return m;
 }
 
-static float local_window_mean(const float *psd, int n_bins, int center, int half_width)
+/* Compute local background noise in the sidebands [center - outer .. center - inner - 1]
+ * and [center + inner + 1 .. center + outer].
+ * Because 1/f room noise and broadband noise have high energy in these adjacent bins,
+ * comparing a peak against its own local sidebands completely eliminates false alarms
+ * in silence or broadband noise while remaining sensitive to true narrowband harmonics. */
+static float local_sideband_noise(const float *psd, int n_bins, int center, int inner, int outer)
 {
-    int lo = clamp_bin(center - half_width, n_bins);
-    int hi = clamp_bin(center + half_width, n_bins);
     double sum = 0.0;
     int count = 0;
-    for (int i = lo; i <= hi; i++) {
-        sum += (double)psd[i];
-        count++;
-    }
-    return (count > 0) ? (float)(sum / (double)count) : 1e-18f;
-}
-
-/* Estimate background noise floor while excluding the narrow harmonic peaks
- * (f0, 2*f0, 3*f0) so a strong drone signal does not inflate its own noise floor. */
-static float estimate_clean_noise_floor(const float *psd, int n_bins_half,
-                                        int f0_bin, int h2_bin, int h3_bin)
-{
-    const int start_bin = 5;
-    double acc = 0.0;
-    int count = 0;
-    for (int i = start_bin; i < n_bins_half; i++) {
-        if (abs(i - f0_bin) <= 2 || abs(i - h2_bin) <= 2 || abs(i - h3_bin) <= 2) {
-            continue;
+    for (int d = inner + 1; d <= outer; d++) {
+        int b_lo = center - d;
+        int b_hi = center + d;
+        if (b_lo >= 4) {
+            sum += (double)psd[b_lo];
+            count++;
         }
-        acc += (double)psd[i];
-        count++;
+        if (b_hi < n_bins) {
+            sum += (double)psd[b_hi];
+            count++;
+        }
     }
-    if (count <= 0) {
-        return audio_processor_noise_floor_estimate(psd, n_bins_half);
+    if (count == 0) {
+        return 1e-18f;
     }
-    float nf = (float)(acc / (double)count);
-    return (nf < 1e-18f) ? 1e-18f : nf;
+    float avg = (float)(sum / (double)count);
+    return (avg < 1e-18f) ? 1e-18f : avg;
 }
 
 bool analyze_harmonics(const float *psd, int n_bins_half, float f0_min_hz, float f0_max_hz,
@@ -282,6 +285,8 @@ bool analyze_harmonics(const float *psd, int n_bins_half, float f0_min_hz, float
     memset(out, 0, sizeof(*out));
 
     const SensitivityProfile *prof = &s_profiles[s_sensitivity_level - 1];
+    const float nf = audio_processor_noise_floor_estimate(psd, n_bins_half);
+    out->noise_floor = nf;
 
     int k0 = (int)ceilf(f0_min_hz / AUDIO_PROC_BIN_HZ);
     int k1 = (int)floorf(f0_max_hz / AUDIO_PROC_BIN_HZ);
@@ -291,37 +296,32 @@ bool analyze_harmonics(const float *psd, int n_bins_half, float f0_min_hz, float
         return false;
     }
 
-    /* Find candidate fundamental f0 with the strongest harmonic comb score
-     * (f0 + 2*f0 + 3*f0), while also tracking the raw peak. */
+    /* Find the strongest fundamental peak in [f0_min_hz .. f0_max_hz] */
     int peak_bin = k0;
-    float best_comb = -1.f;
-    for (int k = k0; k <= k1; k++) {
-        float p1 = psd[k];
-        float p2 = (k * 2 < n_bins_half) ? local_peak_max(psd, n_bins_half, k * 2, 1) : 0.f;
-        float p3 = (k * 3 < n_bins_half) ? local_peak_max(psd, n_bins_half, k * 3, 1) : 0.f;
-        /* Only consider k if p1 is a local maximum and dominates its harmonics */
-        if (p1 >= p2 * 0.25f) {
-            float comb = p1 + 1.5f * p2 + 1.5f * p3;
-            if (comb > best_comb) {
-                best_comb = comb;
-                peak_bin  = k;
-            }
+    float peak   = psd[k0];
+    for (int k = k0 + 1; k <= k1; k++) {
+        if (psd[k] > peak) {
+            peak     = psd[k];
+            peak_bin = k;
         }
     }
 
-    const float peak = local_peak_max(psd, n_bins_half, peak_bin, 1);
     const int h2c = peak_bin * 2;
     const int h3c = peak_bin * 3;
 
-    const float nf = estimate_clean_noise_floor(psd, n_bins_half, peak_bin, h2c, h3c);
-    out->noise_floor     = nf;
-    const float snr      = peak / nf;
+    /* Measure local narrowband SNR at f0, 2*f0, and 3*f0 against their immediate surrounding bins */
+    const float f0_bg = local_sideband_noise(psd, n_bins_half, peak_bin, 2, 8);
+    const float f0_local_snr = peak / f0_bg;
+    const float global_snr   = peak / nf;
+
     out->fundamental_bin = peak_bin;
     out->fundamental_hz  = (float)peak_bin * AUDIO_PROC_BIN_HZ;
     out->fundamental_pwr = peak;
-    out->snr             = snr;
+    out->snr             = f0_local_snr; /* Report local narrowband SNR */
 
-    if (snr < prof->min_peak_snr || h2c >= n_bins_half || h3c >= n_bins_half) {
+    if (global_snr < prof->min_global_snr ||
+        f0_local_snr < prof->min_f0_local_snr ||
+        h2c >= n_bins_half || h3c >= n_bins_half) {
         out->confidence = 0.f;
         return false;
     }
@@ -333,36 +333,24 @@ bool analyze_harmonics(const float *psd, int n_bins_half, float f0_min_hz, float
     out->h2_ratio     = out->harmonic2_pwr / denom;
     out->h3_ratio     = out->harmonic3_pwr / denom;
 
-    /* Check harmonic SNR above background noise floor */
-    const float h2_snr = out->harmonic2_pwr / nf;
-    const float h3_snr = out->harmonic3_pwr / nf;
+    const float h2_bg = local_sideband_noise(psd, n_bins_half, h2c, 2, 7);
+    const float h3_bg = local_sideband_noise(psd, n_bins_half, h3c, 2, 7);
+    const float h2_local_snr = out->harmonic2_pwr / h2_bg;
+    const float h3_local_snr = out->harmonic3_pwr / h3_bg;
 
-    /* Anti-false-alarm check: compare harmonic peaks against the inter-harmonic
-     * valleys at 1.5*f0 and 2.5*f0. Broadband noise (speech, claps, wind, fans)
-     * fills the valleys between harmonics, whereas a drone propeller has sharp
-     * peaks at f0, 2*f0, 3*f0 and quiet valleys in between. */
-    const int v1_bin = peak_bin + (peak_bin / 2);
-    const int v2_bin = h2c + (peak_bin / 2);
-    const float valley1 = local_window_mean(psd, n_bins_half, v1_bin, 1) + 1e-18f;
-    const float valley2 = local_window_mean(psd, n_bins_half, v2_bin, 1) + 1e-18f;
-    const bool valley_ok = (peak > valley1 * prof->min_valley_ratio) &&
-                           (out->harmonic2_pwr > valley2 * (prof->min_valley_ratio * 0.7f));
+    /* Both 2nd and 3rd harmonics must be true narrowband peaks standing out
+     * above their local sidebands AND meet the minimum power ratio to f0. */
+    const bool h2_ok = (out->h2_ratio >= prof->min_h2_ratio) && (h2_local_snr >= prof->min_h2_local_snr);
+    const bool h3_ok = (out->h3_ratio >= prof->min_h3_ratio) && (h3_local_snr >= prof->min_h3_local_snr);
 
-    const bool h2_ok = (out->h2_ratio >= prof->min_h2_ratio) && (h2_snr >= prof->min_harm_snr);
-    const bool h3_ok = (out->h3_ratio >= prof->min_h3_ratio) && (h3_snr >= prof->min_harm_snr * 0.8f);
-
-    /* Normalized harmonic strength (1.0 at threshold, up to 3.0 for strong harmonics) */
-    const float h_score = sqrtf((out->h2_ratio / prof->min_h2_ratio) *
-                                (out->h3_ratio / prof->min_h3_ratio));
-
-    if (!h2_ok || !h3_ok || !valley_ok) {
-        out->confidence = fminf(0.22f, (snr / (prof->snr_norm_scale * 4.f)) * fminf(1.f, h_score * 0.3f));
+    if (!h2_ok || !h3_ok) {
+        out->confidence = fminf(0.15f, (f0_local_snr / (prof->snr_norm_scale * 4.f)));
         return false;
     }
 
-    /* When all 3 checks pass (fundamental SNR, 2nd & 3rd harmonic SNR/ratio, and valley prominence),
-     * compute confidence in [0.35 .. 1.0] so sustained harmonic tones trigger cleanly. */
-    float raw_conf = (snr / prof->snr_norm_scale) * fminf(2.0f, 0.35f + 0.25f * h_score);
-    out->confidence = fminf(1.0f, fmaxf(0.35f, raw_conf));
+    const float harm_prominence = sqrtf((h2_local_snr / prof->min_h2_local_snr) *
+                                        (h3_local_snr / prof->min_h3_local_snr));
+    float raw_conf = (f0_local_snr / prof->snr_norm_scale) * fminf(1.8f, 0.35f * harm_prominence);
+    out->confidence = fminf(1.0f, fmaxf(0.32f, raw_conf));
     return true;
 }

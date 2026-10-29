@@ -206,7 +206,7 @@ void AudioTask(void *pvParameters)
             if (nvs_get_u8(h, "sensitivity", &sens) == ESP_OK) {
                 audio_processor_set_sensitivity((int)sens);
             }
-            uint8_t gain = 4;
+            uint8_t gain = 2;
             if (nvs_get_u8(h, "mic_gain", &gain) == ESP_OK) {
                 audio_processor_set_gain((float)gain);
             }
@@ -411,11 +411,11 @@ void AudioTask(void *pvParameters)
 
 #if CONFIG_BATEAR_AUDIO_DEBUG_LOG
         static int64_t last_dbg_us = 0;
-        if (now_us - last_dbg_us > 1000000LL) {
+        if (audio_processor_get_debug_log() && now_us - last_dbg_us > 1000000LL) {
             ESP_LOGI(TAG,
-                     "dbg: rms=%.5f gate=%.4f harm_ok=%d conf_ema=%.2f (on=%.2f off=%.2f) "
-                     "f0=%.1f h2=%.2f h3=%.2f snr=%.1f alarm=%d",
-                     rms, RMS_MIN, harm_ok ? 1 : 0, (double)s_conf_ema,
+                     "dbg: sens=%d rms=%.5f gate=%.4f harm_ok=%d conf_ema=%.2f (on=%.2f off=%.2f) "
+                     "f0=%.1f h2=%.3f h3=%.3f local_snr=%.1f alarm=%d",
+                     audio_processor_get_sensitivity(), rms, RMS_MIN, harm_ok ? 1 : 0, (double)s_conf_ema,
                      CONF_ON, CONF_OFF,
                      hr.fundamental_hz, hr.h2_ratio, hr.h3_ratio, hr.snr,
                      alarm ? 1 : 0);

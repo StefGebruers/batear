@@ -88,6 +88,8 @@ void  audio_processor_set_sensitivity(int level);
 int   audio_processor_get_sensitivity(void);
 void  audio_processor_set_gain(float gain);
 float audio_processor_get_gain(void);
+void  audio_processor_set_debug_log(bool enable);
+bool  audio_processor_get_debug_log(void);
 
 #ifdef __cplusplus
 }

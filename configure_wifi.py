@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 configure_wifi.py — Stuur Wi-Fi en MQTT instellingen naar BatEar NVS via USB serieel
-en toon daarna de live seriële monitor (met automatische herverbinding na USB reboot).
+en open daarna een interactieve seriële monitor (je kunt commando's typen + Enter!).
 """
+import select
 import sys
 import time
 import serial
@@ -13,7 +14,7 @@ def open_serial_retry(port: str, baud: int = 115200, timeout_s: float = 10.0) ->
     last_err = None
     while time.time() < deadline:
         try:
-            return serial.Serial(port, baud, timeout=0.1)
+            return serial.Serial(port, baud, timeout=0.05)
         except Exception as e:
             last_err = e
             time.sleep(0.25)
@@ -50,7 +51,6 @@ def main() -> int:
     ser = open_serial_retry(port)
 
     try:
-        # Wacht tot de ESP32-S3 na het flashen is opgestart en de console klaar is
         start = time.time()
         while time.time() - start < 4.0:
             try:
@@ -89,16 +89,27 @@ def main() -> int:
             time.sleep(1.2)
             ser = open_serial_retry(port)
 
-        print("\n=== Live Seriële Monitor (druk op Ctrl+C om te stoppen) ===")
+        print("\n=== Interactieve Seriële Monitor (Ctrl+C om te stoppen) ===")
+        print("Tip: typ hier direct commando's + Enter, bijv.:")
+        print("  show                (toon huidige instellingen)")
+        print("  set sensitivity 3   (1=Streng .. 3=Gebalanceerd .. 5=Max)")
+        print("  set debug 1         (zet 1Hz live audio-waarden aan/uit met 1 of 0)\n")
+
         while True:
             try:
                 if ser.in_waiting:
                     data = ser.read(ser.in_waiting)
                     sys.stdout.write(data.decode("utf-8", errors="replace"))
                     sys.stdout.flush()
-                time.sleep(0.03)
+
+                # Lees toetsenbordinvoer als de gebruiker een commando typt + Enter
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.02)
+                if rlist:
+                    line = sys.stdin.readline()
+                    if line:
+                        ser.write((line.strip() + "\r\n").encode("utf-8"))
+                        ser.flush()
             except (serial.SerialException, OSError):
-                # USB-Serial/JTAG re-enumeratie na reboot
                 try:
                     ser.close()
                 except Exception:
