@@ -36,7 +36,7 @@ static const char *TAG = "audio";
 
 #define SAMPLE_RATE_HZ      AUDIO_PROC_SAMPLE_RATE_HZ
 #define FRAME_SAMPLES       AUDIO_PROC_FFT_SIZE
-#define HOP_MS              100
+#define HOP_MS              10
 
 /* Fundamental search band (Hz); 3×f0 must stay below Nyquist (8 kHz). */
 #define HARM_F0_MIN_HZ      110.f
@@ -80,7 +80,7 @@ static esp_err_t i2s_microphone_init(void)
      *     Mic 3 (West, SEL=3V3) on DIN2 (GPIO 7).
      */
     i2s_chan_config_t chan0_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    chan0_cfg.dma_desc_num  = 6;
+    chan0_cfg.dma_desc_num  = 8;
     chan0_cfg.dma_frame_num = 256;
 
     esp_err_t err = i2s_new_channel(&chan0_cfg, NULL, &s_rx);
@@ -115,13 +115,17 @@ static esp_err_t i2s_microphone_init(void)
     }
 
     /* INMP441 / ICS-43434 datasheets require a pull-down on SD (DOUT) during
-     * High-Z tri-state slots; disable ESP32-S3's default internal pull-up. */
+     * High-Z tri-state slots; disable ESP32-S3's default internal pull-up.
+     * Also reduce BCLK/WS pad drive strength to GPIO_DRIVE_CAP_0 (~5 mA) to
+     * source-terminate daisy-chained SCK/WS jumper wires and prevent ringing. */
     gpio_pullup_dis(I2S_MIC_DIN_GPIO);
     gpio_pulldown_en(I2S_MIC_DIN_GPIO);
+    gpio_set_drive_capability(I2S_MIC_BCLK_GPIO, GPIO_DRIVE_CAP_0);
+    gpio_set_drive_capability(I2S_MIC_WS_GPIO, GPIO_DRIVE_CAP_0);
 
     /* Initialize second stereo bus (I2S_NUM_1) as Slave clocked by GPIO 4 & GPIO 5 */
     i2s_chan_config_t chan1_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_SLAVE);
-    chan1_cfg.dma_desc_num  = 6;
+    chan1_cfg.dma_desc_num  = 8;
     chan1_cfg.dma_frame_num = 256;
 
     if (i2s_new_channel(&chan1_cfg, NULL, &s_rx1) == ESP_OK) {
@@ -209,7 +213,7 @@ static bool read_pcm_chunk_bytes(i2s_chan_handle_t chan, uint8_t *dst, size_t ne
  */
 static inline int32_t sanitize_i2s_24bit_sample(int32_t raw)
 {
-    int32_t s = ((int32_t)((uint32_t)raw << 3)) >> 3;
+    int32_t s = ((int32_t)((uint32_t)raw << 7)) >> 5;
     return s & ~0xFF;
 }
 
@@ -401,8 +405,21 @@ void AudioTask(void *pvParameters)
 #if CONFIG_BATEAR_AUDIO_PERF_LOG
         const int64_t t_harm_start = esp_timer_get_time();
 #endif
-        const bool harm_ok =
+        bool harm_ok =
             analyze_harmonics(psd, AUDIO_PROC_PSD_BINS, HARM_F0_MIN_HZ, HARM_F0_MAX_HZ, &hr);
+        if (!harm_ok) {
+            /* Also check orthogonal cross arm (Mic 2 Oost) if Mic 0 Noord missed */
+            HarmonicAnalysisResult hr_orth;
+            if (audio_processor_compute_psd(s_fft_work, s_raw_ch2, FRAME_SAMPLES) == ESP_OK) {
+                const float *psd_orth = audio_processor_last_psd();
+                bool ok_orth = analyze_harmonics(psd_orth, AUDIO_PROC_PSD_BINS,
+                                                 HARM_F0_MIN_HZ, HARM_F0_MAX_HZ, &hr_orth);
+                if (ok_orth || hr_orth.confidence > hr.confidence) {
+                    hr      = hr_orth;
+                    harm_ok = ok_orth;
+                }
+            }
+        }
 #if CONFIG_BATEAR_AUDIO_PERF_LOG
         const int32_t dt_harm_us = (int32_t)(esp_timer_get_time() - t_harm_start);
         static int      s_perf_n;
@@ -471,12 +488,16 @@ void AudioTask(void *pvParameters)
             }
 
             const int active_metric = harm_ok ? 1 : 0;
+            const int sens_lvl = audio_processor_get_sensitivity();
+            const float conf_on_thresh = (sens_lvl >= 5) ? 0.20f :
+                                         (sens_lvl == 4) ? 0.24f : CONF_ON;
+            const int sustain_on_req   = (sens_lvl >= 4) ? 2 : SUSTAIN_FRAMES_ON;
 
             if (!alarm) {
-                if (harm_ok && s_conf_ema >= CONF_ON) {
+                if (harm_ok && s_conf_ema >= conf_on_thresh) {
                     sustain_on++;
                     sustain_off = 0;
-                    if (sustain_on >= SUSTAIN_FRAMES_ON) {
+                    if (sustain_on >= sustain_on_req) {
                         alarm = true;
                         detection_count++;
                         last_pushed_doa  = doa_deg;
