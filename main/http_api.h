@@ -26,6 +26,7 @@ typedef struct {
     uint16_t f0_bin;
     float    confidence;
     int16_t  doa_deg;
+    int16_t  doa_elev_deg;
     float    doa_conf;
     int64_t  timestamp;
 } HttpDroneStatus_t;

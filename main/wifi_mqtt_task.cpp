@@ -142,8 +142,16 @@ static void hw_display_event(const DroneEvent_t *ev)
     oled_print(0, 4, line);
 
     if (alarm && ev->doa_deg >= 0) {
-        snprintf(line, sizeof(line), "DoA:%d (%s)",
-                 (int)ev->doa_deg, doa_angle_to_cardinal(ev->doa_deg));
+        if (ev->doa_elev_deg >= 0) {
+            snprintf(line, sizeof(line), "Az:%d(%s) El:%dd",
+                     (int)ev->doa_deg,
+                     doa_angle_to_cardinal(ev->doa_deg, ev->active_mics),
+                     (int)ev->doa_elev_deg);
+        } else {
+            snprintf(line, sizeof(line), "DoA:%d (%s)",
+                     (int)ev->doa_deg,
+                     doa_angle_to_cardinal(ev->doa_deg, ev->active_mics));
+        }
     } else {
         snprintf(line, sizeof(line), "IP:%.15s", s_ip_str);
     }
@@ -367,7 +375,7 @@ static void publish_ha_discovery(void)
         "{"
             "\"name\":\"Batear %s Richting\","
             "\"unique_id\":\"batear_%s_doa_cardinal\","
-            "\"icon\":\"mdi:AxisArrow\","
+            "\"icon\":\"mdi:compass\","
             "\"state_topic\":\"%s\","
             "\"value_template\":\"{{ value_json.doa_cardinal }}\","
             "\"availability_topic\":\"%s\","
@@ -381,8 +389,31 @@ static void publish_ha_discovery(void)
 
     esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
 
+    /* DoA elevation angle sensor (0..90 deg) */
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/batear_%s/doa_elev_deg/config", s_device_id);
+
+    snprintf(payload, sizeof(payload),
+        "{"
+            "\"name\":\"Batear %s Elevation\","
+            "\"unique_id\":\"batear_%s_doa_elev_deg\","
+            "\"unit_of_measurement\":\"°\","
+            "\"icon\":\"mdi:angle-acute\","
+            "\"state_topic\":\"%s\","
+            "\"value_template\":\"{{ value_json.doa_elev_deg if value_json.doa_elev_deg >= 0 else 'unknown' }}\","
+            "\"availability_topic\":\"%s\","
+            "\"payload_available\":\"online\","
+            "\"payload_not_available\":\"offline\","
+            "\"device\":{\"identifiers\":[\"batear_%s\"]}"
+        "}",
+        s_device_id, s_device_id,
+        s_topic_status, s_topic_avail,
+        s_device_id);
+
+    esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+
     /* Initial idle state so Home Assistant entities initialize immediately */
-    char init_json[320];
+    char init_json[360];
     uint8_t det_id = lorawan_get_keys()->device_id;
     snprintf(init_json, sizeof(init_json),
         "{"
@@ -393,6 +424,7 @@ static void publish_ha_discovery(void)
             "\"seq\":0,"
             "\"confidence\":0.0000,"
             "\"doa_deg\":-1,"
+            "\"doa_elev_deg\":-1,"
             "\"doa_cardinal\":\"N/A\","
             "\"timestamp\":0"
         "}",
@@ -491,6 +523,7 @@ extern "C" void WifiMqttTask(void *pvParameters)
                 .f0_bin         = static_cast<uint16_t>(ev.f0_bin),
                 .confidence     = ev.peak_ratio,
                 .doa_deg        = ev.doa_deg,
+                .doa_elev_deg   = ev.doa_elev_deg,
                 .doa_conf       = ev.doa_conf,
                 .timestamp      = ts,
             };
@@ -510,6 +543,7 @@ extern "C" void WifiMqttTask(void *pvParameters)
                     "\"seq\":%u,"
                     "\"confidence\":%.4f,"
                     "\"doa_deg\":%d,"
+                    "\"doa_elev_deg\":%d,"
                     "\"doa_cardinal\":\"%s\","
                     "\"timestamp\":%lld"
                 "}",
@@ -519,7 +553,8 @@ extern "C" void WifiMqttTask(void *pvParameters)
                 (unsigned)tx_seq++,
                 (double)ev.peak_ratio,
                 (int)ev.doa_deg,
-                doa_angle_to_cardinal(ev.doa_deg),
+                (int)ev.doa_elev_deg,
+                doa_angle_to_cardinal(ev.doa_deg, ev.active_mics),
                 (long long)ts);
 
             esp_mqtt_client_publish(s_mqtt, s_topic_status, json, 0, 1, 1);

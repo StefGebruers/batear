@@ -28,7 +28,9 @@ typedef struct {
     float          peak_ratio;    /* harmonic confidence at the moment of transition */
     int            f0_bin;        /* fundamental bin index (or harm_ok flag)         */
     float          rms;           /* frame RMS at transition                  */
-    int16_t        doa_deg;       /* DoA azimuth in degrees (0..180, or -1 if N/A)   */
+    int16_t        doa_deg;       /* DoA azimuth in degrees (0..359, or -1 if N/A)   */
+    int16_t        doa_elev_deg;  /* DoA elevation in degrees (0..90, or -1 if N/A)  */
+    uint8_t        active_mics;   /* Number of active microphones (2 or 4)           */
     float          doa_conf;      /* DoA SRP-PHAT contrast confidence                */
     uint32_t       timestamp_ms;  /* xTaskGetTickCount() * portTICK_PERIOD_MS */
 } DroneEvent_t;

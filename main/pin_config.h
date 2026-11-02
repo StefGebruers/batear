@@ -36,10 +36,21 @@
 #define BOARD_IDF_TARGET    "esp32s3"
 #define BOARD_FLASH_SIZE    "8MB"
 
-/* I2S microphone (ICS-43434) */
+/* I2S microphone array (up to 4x ICS-43434 on 2 stereo data lines sharing BCLK/WS)
+ *   Bus 0 (PIN_I2S_DIN  = GPIO 6): Mic 0 Noord (SEL=GND), Mic 1 Zuid (SEL=3V3)
+ *   Bus 1 (PIN_I2S_DIN2 = GPIO 7): Mic 2 Oost  (SEL=GND), Mic 3 West (SEL=3V3)
+ */
 #define PIN_I2S_BCLK     4
 #define PIN_I2S_WS       5
 #define PIN_I2S_DIN      6
+#define PIN_I2S_DIN2     7
+
+/* Reserved for GY-NEO6MV2 (NEO-6M) GPS UART1:
+ *   GPS TX -> Heltec GPIO 2 (PIN_GPS_RX)
+ *   GPS RX -> Heltec GPIO 3 (PIN_GPS_TX)
+ */
+#define PIN_GPS_RX       2
+#define PIN_GPS_TX       3
 
 /* LoRa SX1262 SPI — fixed on-board wiring */
 #define PIN_LORA_SCK     9
@@ -97,6 +108,7 @@
 #define PIN_I2S_BCLK    38
 #define PIN_I2S_WS      39
 #define PIN_I2S_DIN     40
+#define PIN_I2S_DIN2    41
 
 /* W5500 Ethernet SPI — fixed on-board wiring */
 #define PIN_ETH_SCLK    10

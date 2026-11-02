@@ -11,6 +11,8 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
+#include <stdlib.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -29,6 +31,7 @@ static const char *TAG = "audio";
 #define I2S_MIC_BCLK_GPIO   ((gpio_num_t)PIN_I2S_BCLK)
 #define I2S_MIC_WS_GPIO     ((gpio_num_t)PIN_I2S_WS)
 #define I2S_MIC_DIN_GPIO    ((gpio_num_t)PIN_I2S_DIN)
+#define I2S_MIC_DIN2_GPIO   ((gpio_num_t)PIN_I2S_DIN2)
 
 #define SAMPLE_RATE_HZ      AUDIO_PROC_SAMPLE_RATE_HZ
 #define FRAME_SAMPLES       AUDIO_PROC_FFT_SIZE
@@ -48,8 +51,11 @@ static const char *TAG = "audio";
 static float __attribute__((aligned(16))) s_fft_work[2 * FRAME_SAMPLES];
 static int32_t __attribute__((aligned(16))) s_raw[FRAME_SAMPLES];
 static int32_t __attribute__((aligned(16))) s_raw_right[FRAME_SAMPLES];
+static int32_t __attribute__((aligned(16))) s_raw_ch2[FRAME_SAMPLES];
+static int32_t __attribute__((aligned(16))) s_raw_ch3[FRAME_SAMPLES];
 /* Stereo DMA: L,R pairs — ESP32-S3 Philips RX (see i2s_microphone_init). */
 static int32_t __attribute__((aligned(16))) s_stereo[FRAME_SAMPLES * 2];
+static int32_t __attribute__((aligned(16))) s_stereo1[FRAME_SAMPLES * 2];
 
 #if CONFIG_BATEAR_ROLE_WIRED_DETECTOR
 /* Down-sampled buffer handed off to the TF recorder — int16 mono @ 16 kHz.
@@ -58,26 +64,30 @@ static int32_t __attribute__((aligned(16))) s_stereo[FRAME_SAMPLES * 2];
 static int16_t __attribute__((aligned(16))) s_pcm16[FRAME_SAMPLES];
 #endif
 
-static i2s_chan_handle_t s_rx = NULL;
+static i2s_chan_handle_t s_rx  = NULL;
+static i2s_chan_handle_t s_rx1 = NULL;
 static float             s_conf_ema = 0.f;
 
 static esp_err_t i2s_microphone_init(void)
 {
     /*
-     * ESP32-S3 Philips default slot_mask is BOTH (see i2s_std.h). Using MONO mode
-     * (active_slot=1) with that mask can yield all-zero RX; use STEREO + software
-     * deinterleave — same effective data as legacy ESP32 mono + LEFT.
+     * 4-Mic Cross Array ("kruisverband") on ESP32-S3:
+     *   - I2S_NUM_0 (MASTER) drives BCLK (GPIO 4) and WS (GPIO 5) for all 4 mics,
+     *     and reads Mic 0 (Noord, SEL=GND) + Mic 1 (Zuid, SEL=3V3) on DIN (GPIO 6).
+     *   - I2S_NUM_1 (SLAVE) shares the exact same BCLK (GPIO 4) and WS (GPIO 5)
+     *     clocks via internal GPIO matrix input, and reads Mic 2 (Oost, SEL=GND) +
+     *     Mic 3 (West, SEL=3V3) on DIN2 (GPIO 7).
      */
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    chan_cfg.dma_desc_num  = 6;
-    chan_cfg.dma_frame_num = 256;
+    i2s_chan_config_t chan0_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    chan0_cfg.dma_desc_num  = 6;
+    chan0_cfg.dma_frame_num = 256;
 
-    esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &s_rx);
+    esp_err_t err = i2s_new_channel(&chan0_cfg, NULL, &s_rx);
     if (err != ESP_OK) {
         return err;
     }
 
-    i2s_std_config_t std_cfg = {
+    i2s_std_config_t std0_cfg = {
         .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_HZ),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT,
                                                          I2S_SLOT_MODE_STEREO),
@@ -94,14 +104,32 @@ static esp_err_t i2s_microphone_init(void)
             },
         },
     };
-    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
+    std0_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_384;
 
-    err = i2s_channel_init_std_mode(s_rx, &std_cfg);
+    err = i2s_channel_init_std_mode(s_rx, &std0_cfg);
     if (err != ESP_OK) {
         i2s_del_channel(s_rx);
         s_rx = NULL;
         return err;
     }
+
+    /* Initialize second stereo bus (I2S_NUM_1) as Slave clocked by GPIO 4 & GPIO 5 */
+    i2s_chan_config_t chan1_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_SLAVE);
+    chan1_cfg.dma_desc_num  = 6;
+    chan1_cfg.dma_frame_num = 256;
+
+    if (i2s_new_channel(&chan1_cfg, NULL, &s_rx1) == ESP_OK) {
+        i2s_std_config_t std1_cfg = std0_cfg;
+        std1_cfg.gpio_cfg.din = I2S_MIC_DIN2_GPIO;
+        if (i2s_channel_init_std_mode(s_rx1, &std1_cfg) == ESP_OK) {
+            /* Enable slave first so it starts on the very first clock edge from master */
+            i2s_channel_enable(s_rx1);
+        } else {
+            i2s_del_channel(s_rx1);
+            s_rx1 = NULL;
+        }
+    }
+
     return i2s_channel_enable(s_rx);
 }
 
@@ -141,14 +169,16 @@ static void log_pcm_int32_span(const int32_t *s, int n, float raw_rms_norm, cons
              note, lo, hi, (int32_t)(hi - lo), raw_rms_norm);
 }
 
-static bool read_pcm_chunk_bytes(uint8_t *dst, size_t need_bytes)
+static bool read_pcm_chunk_bytes(i2s_chan_handle_t chan, uint8_t *dst, size_t need_bytes, uint32_t timeout_ms)
 {
+    if (chan == NULL) {
+        return false;
+    }
     size_t got = 0;
     while (got < need_bytes) {
         size_t    chunk = 0;
-        esp_err_t e     = i2s_channel_read(s_rx, dst + got, need_bytes - got, &chunk, pdMS_TO_TICKS(1000));
+        esp_err_t e     = i2s_channel_read(chan, dst + got, need_bytes - got, &chunk, pdMS_TO_TICKS(timeout_ms));
         if (e != ESP_OK) {
-            ESP_LOGW(TAG, "I2S read err %s", esp_err_to_name(e));
             return false;
         }
         if (chunk == 0) {
@@ -160,14 +190,16 @@ static bool read_pcm_chunk_bytes(uint8_t *dst, size_t need_bytes)
     return true;
 }
 
-/** STEREO Philips: read 2 * n int32 (L,R,…), deinterleave Left (`out_l`) and Right (`out_r`). */
-static bool read_pcm_frame_stereo_i32(int32_t *out_l, int32_t *out_r, int n)
+/** Read 4 channels from I2S_NUM_0 (DIN=GPIO6: Ch0, Ch1) and I2S_NUM_1 (DIN2=GPIO7: Ch2, Ch3). */
+static bool read_pcm_frame_quad_i32(int32_t *out_ch0, int32_t *out_ch1,
+                                    int32_t *out_ch2, int32_t *out_ch3, int n)
 {
     if (n != FRAME_SAMPLES) {
         return false;
     }
     const size_t need_bytes = (size_t)n * 2u * sizeof(int32_t);
-    if (!read_pcm_chunk_bytes((uint8_t *)s_stereo, need_bytes)) {
+    if (!read_pcm_chunk_bytes(s_rx, (uint8_t *)s_stereo, need_bytes, 1000)) {
+        ESP_LOGW(TAG, "I2S0 read timeout");
         return false;
     }
 #if CONFIG_BATEAR_I2S_MIC_SLOT_RIGHT
@@ -178,14 +210,24 @@ static bool read_pcm_frame_stereo_i32(int32_t *out_l, int32_t *out_r, int n)
     const unsigned ch_r = 1u;
 #endif
     for (int i = 0; i < n; i++) {
-        out_l[i] = s_stereo[i * 2 + ch_l];
-        out_r[i] = s_stereo[i * 2 + ch_r];
+        out_ch0[i] = s_stereo[i * 2 + ch_l];
+        out_ch1[i] = s_stereo[i * 2 + ch_r];
+    }
+
+    if (s_rx1 != NULL && read_pcm_chunk_bytes(s_rx1, (uint8_t *)s_stereo1, need_bytes, 100)) {
+        for (int i = 0; i < n; i++) {
+            out_ch2[i] = s_stereo1[i * 2 + ch_l];
+            out_ch3[i] = s_stereo1[i * 2 + ch_r];
+        }
+    } else {
+        memset(out_ch2, 0, (size_t)n * sizeof(int32_t));
+        memset(out_ch3, 0, (size_t)n * sizeof(int32_t));
     }
     return true;
 }
 
 static void push_event(DroneEventType type, float ratio, int active, float rms,
-                       int16_t doa_deg, float doa_conf)
+                       int16_t doa_deg, int16_t doa_elev_deg, uint8_t active_mics, float doa_conf)
 {
     DroneEvent_t ev = {
         .type         = type,
@@ -193,6 +235,8 @@ static void push_event(DroneEventType type, float ratio, int active, float rms,
         .f0_bin       = active,
         .rms          = rms,
         .doa_deg      = doa_deg,
+        .doa_elev_deg = doa_elev_deg,
+        .active_mics  = active_mics,
         .doa_conf     = doa_conf,
         .timestamp_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
     };
@@ -246,8 +290,8 @@ void AudioTask(void *pvParameters)
         vTaskSuspend(NULL);
         return;
     }
-    ESP_LOGI(TAG, "I2S OK — port0 STEREO 2-mic DoA BCLK=%d WS=%d DIN=%d spacing=%.0fmm",
-             PIN_I2S_BCLK, PIN_I2S_WS, PIN_I2S_DIN, (double)doa_processor_get_spacing_mm());
+    ESP_LOGI(TAG, "I2S OK — 4-mic Cross DoA BCLK=%d WS=%d DIN0=%d DIN1=%d spacing=%.0fmm",
+             PIN_I2S_BCLK, PIN_I2S_WS, PIN_I2S_DIN, PIN_I2S_DIN2, (double)doa_processor_get_spacing_mm());
 
     int     sustain_on      = 0;
     int     sustain_off     = 0;
@@ -255,18 +299,21 @@ void AudioTask(void *pvParameters)
     int     detection_count = 0;
     bool    mic_diag_logged = false;
     int     frames_total    = 0;
-    int16_t last_pushed_doa = -1;
-    int64_t last_push_us    = 0;
+    int16_t last_pushed_doa  = -1;
+    int16_t last_pushed_elev = -1;
+    int64_t last_push_us     = 0;
 
     for (;;) {
-        if (!read_pcm_frame_stereo_i32(s_raw, s_raw_right, FRAME_SAMPLES)) {
+        if (!read_pcm_frame_quad_i32(s_raw, s_raw_right, s_raw_ch2, s_raw_ch3, FRAME_SAMPLES)) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
         if (!mic_diag_logged) {
-            log_pcm_int32_span(s_raw, FRAME_SAMPLES, raw_i32_rms_norm(s_raw, FRAME_SAMPLES), "Left (SEL=GND)");
-            log_pcm_int32_span(s_raw_right, FRAME_SAMPLES, raw_i32_rms_norm(s_raw_right, FRAME_SAMPLES), "Right (SEL=3V3)");
+            log_pcm_int32_span(s_raw,       FRAME_SAMPLES, raw_i32_rms_norm(s_raw,       FRAME_SAMPLES), "Mic0 Noord (DIN=6, SEL=GND)");
+            log_pcm_int32_span(s_raw_right, FRAME_SAMPLES, raw_i32_rms_norm(s_raw_right, FRAME_SAMPLES), "Mic1 Zuid  (DIN=6, SEL=3V3)");
+            log_pcm_int32_span(s_raw_ch2,   FRAME_SAMPLES, raw_i32_rms_norm(s_raw_ch2,   FRAME_SAMPLES), "Mic2 Oost  (DIN=7, SEL=GND)");
+            log_pcm_int32_span(s_raw_ch3,   FRAME_SAMPLES, raw_i32_rms_norm(s_raw_ch3,   FRAME_SAMPLES), "Mic3 West  (DIN=7, SEL=3V3)");
             mic_diag_logged = true;
         }
 
@@ -373,10 +420,13 @@ void AudioTask(void *pvParameters)
         const int64_t now_us = esp_timer_get_time();
 
         DoaResult doa_res = {0};
-        const int32_t *pcm_ch[2] = { s_raw, s_raw_right };
-        doa_processor_estimate(pcm_ch, 2, doa_processor_get_spacing_mm(),
+        const int32_t *pcm_ch[4] = { s_raw, s_raw_right, s_raw_ch2, s_raw_ch3 };
+        doa_processor_estimate(pcm_ch, 4, doa_processor_get_spacing_mm(),
                                hr.fundamental_bin, &doa_res);
-        const int16_t doa_deg = doa_res.valid ? (int16_t)lrintf(doa_res.azimuth_deg) : -1;
+        const int16_t doa_deg      = doa_res.valid ? (int16_t)lrintf(doa_res.azimuth_deg) : -1;
+        const int16_t doa_elev_deg = (doa_res.valid && doa_res.elevation_deg >= 0.0f)
+                                     ? (int16_t)lrintf(doa_res.elevation_deg) : -1;
+        const uint8_t active_mics  = (uint8_t)doa_res.active_mics;
 
         if (rms < RMS_MIN) {
             s_conf_ema *= (1.f - EMA_ALPHA);
@@ -384,9 +434,10 @@ void AudioTask(void *pvParameters)
                 sustain_off++;
                 if (sustain_off >= SUSTAIN_FRAMES_OFF) {
                     alarm = false;
-                    last_pushed_doa = -1;
+                    last_pushed_doa  = -1;
+                    last_pushed_elev = -1;
                     ESP_LOGI(TAG, "CLEAR (silent)");
-                    push_event(DRONE_EVENT_CLEAR, 0.f, 0, rms, -1, 0.f);
+                    push_event(DRONE_EVENT_CLEAR, 0.f, 0, rms, -1, -1, active_mics, 0.f);
                 }
             }
         } else {
@@ -405,14 +456,16 @@ void AudioTask(void *pvParameters)
                     if (sustain_on >= SUSTAIN_FRAMES_ON) {
                         alarm = true;
                         detection_count++;
-                        last_pushed_doa = doa_deg;
-                        last_push_us    = now_us;
-                        ESP_LOGW(TAG, "ALARM #%d: f0=%.1f Hz conf=%.2f rms=%.5f DoA=%d deg (%s)",
+                        last_pushed_doa  = doa_deg;
+                        last_pushed_elev = doa_elev_deg;
+                        last_push_us     = now_us;
+                        ESP_LOGW(TAG, "ALARM #%d: f0=%.1f Hz conf=%.2f rms=%.5f mics=%u Az=%d deg (%s) Elev=%d deg",
                                  detection_count, hr.fundamental_hz, (double)s_conf_ema, rms,
-                                 (int)doa_deg, doa_angle_to_cardinal(doa_deg));
+                                 (unsigned)active_mics, (int)doa_deg,
+                                 doa_angle_to_cardinal(doa_deg, active_mics), (int)doa_elev_deg);
                         push_event(DRONE_EVENT_ALARM, hr.confidence,
                                    hr.fundamental_bin > 255 ? 255 : hr.fundamental_bin, rms,
-                                   doa_deg, doa_res.confidence);
+                                   doa_deg, doa_elev_deg, active_mics, doa_res.confidence);
                     }
                 } else {
                     sustain_on = 0;
@@ -423,20 +476,25 @@ void AudioTask(void *pvParameters)
                     sustain_on = 0;
                     if (sustain_off >= SUSTAIN_FRAMES_OFF) {
                         alarm = false;
-                        last_pushed_doa = -1;
+                        last_pushed_doa  = -1;
+                        last_pushed_elev = -1;
                         ESP_LOGI(TAG, "CLEAR (harm_ok=%d conf=%.2f)", harm_ok, (double)s_conf_ema);
-                        push_event(DRONE_EVENT_CLEAR, hr.confidence, active_metric, rms, -1, 0.f);
+                        push_event(DRONE_EVENT_CLEAR, hr.confidence, active_metric, rms,
+                                   -1, -1, active_mics, 0.f);
                     }
                 } else {
                     sustain_off = 0;
-                    /* Live DoA tracking during active alarm: push an update when direction shifts */
+                    /* Live DoA/Elevation tracking during active alarm */
                     if (doa_res.valid && (now_us - last_push_us) >= 600000LL &&
-                        (last_pushed_doa < 0 || abs((int)doa_deg - (int)last_pushed_doa) >= 8)) {
-                        last_pushed_doa = doa_deg;
-                        last_push_us    = now_us;
+                        (last_pushed_doa < 0 ||
+                         abs((int)doa_deg - (int)last_pushed_doa) >= 8 ||
+                         abs((int)doa_elev_deg - (int)last_pushed_elev) >= 8)) {
+                        last_pushed_doa  = doa_deg;
+                        last_pushed_elev = doa_elev_deg;
+                        last_push_us     = now_us;
                         push_event(DRONE_EVENT_ALARM, hr.confidence,
                                    hr.fundamental_bin > 255 ? 255 : hr.fundamental_bin, rms,
-                                   doa_deg, doa_res.confidence);
+                                   doa_deg, doa_elev_deg, active_mics, doa_res.confidence);
                     }
                 }
             }
@@ -445,9 +503,10 @@ void AudioTask(void *pvParameters)
         static int64_t last_cal_us = 0;
         if (alarm && now_us - last_cal_us > 1000000LL) {
             ESP_LOGI(TAG,
-                     "cal: f0=%.1f Hz h2=%.2f h3=%.2f snr=%.1f conf_ema=%.2f rms=%.5f DoA=%d deg (%s)",
+                     "cal: f0=%.1f Hz h2=%.2f h3=%.2f snr=%.1f conf=%.2f mics=%u Az=%d deg (%s) Elev=%d deg",
                      hr.fundamental_hz, hr.h2_ratio, hr.h3_ratio, hr.snr,
-                     (double)conf_display, rms, (int)doa_deg, doa_angle_to_cardinal(doa_deg));
+                     (double)conf_display, (unsigned)active_mics,
+                     (int)doa_deg, doa_angle_to_cardinal(doa_deg, active_mics), (int)doa_elev_deg);
             last_cal_us = now_us;
         }
 
@@ -455,13 +514,13 @@ void AudioTask(void *pvParameters)
         static int64_t last_dbg_us = 0;
         if (audio_processor_get_debug_log() && now_us - last_dbg_us > 1000000LL) {
             ESP_LOGI(TAG,
-                     "dbg: sens=%d rms_L=%.5f rms_R=%.5f harm_ok=%d conf_ema=%.2f "
-                     "f0=%.1f h2=%.3f h3=%.3f snr=%.1f DoA=%d deg (%s) alarm=%d",
-                     audio_processor_get_sensitivity(), doa_res.rms_left, doa_res.rms_right,
-                     harm_ok ? 1 : 0, (double)s_conf_ema,
-                     hr.fundamental_hz, hr.h2_ratio, hr.h3_ratio, hr.snr,
-                     (int)doa_deg, doa_angle_to_cardinal(doa_deg),
-                     alarm ? 1 : 0);
+                     "dbg: mics=%u rms[N=%.4f Z=%.4f O=%.4f W=%.4f] conf=%.2f "
+                     "f0=%.1f snr=%.1f Az=%d deg (%s) Elev=%d deg alarm=%d",
+                     (unsigned)active_mics,
+                     doa_res.rms_ch[0], doa_res.rms_ch[1], doa_res.rms_ch[2], doa_res.rms_ch[3],
+                     (double)s_conf_ema, hr.fundamental_hz, hr.snr,
+                     (int)doa_deg, doa_angle_to_cardinal(doa_deg, active_mics),
+                     (int)doa_elev_deg, alarm ? 1 : 0);
             last_dbg_us = now_us;
         }
 #endif

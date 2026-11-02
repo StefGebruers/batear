@@ -1,5 +1,9 @@
 /*
- * doa_processor.c — Frequency-domain SRP-PHAT Direction of Arrival (DoA)
+ * doa_processor.c — 2D/3D Frequency-domain SNR-weighted SRP-PHAT DoA estimator
+ *
+ * Computes Azimuth (0..360 deg) and Elevation (0..90 deg) for a 4-microphone
+ * planar cross array ("kruisverband"), with automatic fallback to 1D Azimuth
+ * (0..180 deg) if only 2 microphones are connected.
  */
 
 #include "doa_processor.h"
@@ -16,26 +20,34 @@ static const char *TAG = "doa";
 /* Minimum normalized AC RMS on each microphone channel to consider it connected */
 #define DOA_MIN_CHAN_RMS    0.00008f
 
-/* Number of frequency bins around f0, 2*f0, 3*f0 used for phase correlation */
+/* Number of frequency bins around harmonics and broadband peaks */
 #define DOA_HARM_HALF_WIDTH 2
-#define DOA_MAX_ACTIVE_BINS 24
+#define DOA_MAX_ACTIVE_BINS 36
 
-/* Circular EMA smoothing factor for azimuth */
-#define DOA_EMA_ALPHA       0.40f
+/* Number of precomputed delay points per microphone pair in the 1D GCC-PHAT LUT */
+#define DOA_TAU_LUT_SIZE    121
+
+/* Base EMA smoothing factor for azimuth and elevation (scaled by coherence) */
+#define DOA_EMA_ALPHA_BASE  0.42f
 
 /* Working FFT buffers for up to 4 channels (interleaved complex float: 2 * 1024 floats each) */
 static float __attribute__((aligned(16))) s_fft_ch[DOA_MAX_MICS][2 * AUDIO_PROC_FFT_SIZE];
 
+/* Precomputed 1D GCC-PHAT curve per microphone pair for ultra-fast 2D (Azimuth x Elevation) search */
+static float s_gcc_lut[6][DOA_TAU_LUT_SIZE];
+
 static bool  s_ema_init       = false;
 static float s_ema_sin        = 0.0f;
 static float s_ema_cos        = 1.0f;
-static float s_mic_spacing_mm = 83.0f; /* Default: 83 mm (8.3 cm) */
+static float s_ema_elev_deg   = 0.0f;
+static float s_mic_spacing_mm = 83.0f; /* Default: 83 mm (distance between opposite mics N-Z and O-W) */
 
 esp_err_t doa_processor_init(void)
 {
-    s_ema_init = false;
-    s_ema_sin  = 0.0f;
-    s_ema_cos  = 1.0f;
+    s_ema_init     = false;
+    s_ema_sin      = 0.0f;
+    s_ema_cos      = 1.0f;
+    s_ema_elev_deg = 0.0f;
     ESP_LOGI(TAG, "DoA processor initialized (spacing=%.0f mm)", (double)s_mic_spacing_mm);
     return ESP_OK;
 }
@@ -58,23 +70,26 @@ float doa_processor_get_spacing_mm(void)
     return s_mic_spacing_mm;
 }
 
-const char *doa_angle_to_cardinal(int16_t deg)
+const char *doa_angle_to_cardinal(int16_t deg, int active_mics)
 {
     if (deg < 0 || deg > 360) {
         return "N/A";
     }
-    if (deg <= 180) {
-        if (deg < 30)  return "LINKS";
-        if (deg < 70)  return "LINKS-VOOR";
+    if (active_mics < 4) {
+        if (deg < 30)   return "LINKS";
+        if (deg < 70)   return "LINKS-VOOR";
         if (deg <= 110) return "MIDDEN";
         if (deg <= 150) return "RECHTS-VOOR";
         return "RECHTS";
     }
-    static const char * const DIRS[8] = {
-        "N", "NE", "E", "SE", "S", "SW", "W", "NW"
+    /* 4-mic 360° Dutch compass labels:
+     *   0° = Noord (Voor), 90° = Oost (Rechts), 180° = Zuid (Achter), 270° = West (Links)
+     */
+    static const char * const DIRS_NL[8] = {
+        "N", "NO", "O", "ZO", "Z", "ZW", "W", "NW"
     };
-    int idx = ((deg + 22) % 360) / 45;
-    return DIRS[idx & 7];
+    int idx = (((int)deg + 22) % 360) / 45;
+    return DIRS_NL[idx & 7];
 }
 
 static float prepare_channel_fft(float *fft_io, const int32_t *pcm, int n_samples)
@@ -102,40 +117,93 @@ static float prepare_channel_fft(float *fft_io, const int32_t *pcm, int n_sample
     return (float)sqrt(sum_sq / (double)n_samples);
 }
 
-static int select_active_bins(int f0_bin, int bins_out[DOA_MAX_ACTIVE_BINS])
+/**
+ * Select up to DOA_MAX_ACTIVE_BINS bins combining:
+ *   1. The detected harmonic series (f0, 2*f0, 3*f0, 4*f0) with a 1.5x priority weight.
+ *   2. High-SNR spectral peaks across the 140..1900 Hz band so broadband propeller
+ *      energy averages out single-frequency room reflections (multipath).
+ */
+static int select_active_bins_weighted(int f0_bin,
+                                       int active_mics,
+                                       int bins_out[DOA_MAX_ACTIVE_BINS],
+                                       float weights_out[DOA_MAX_ACTIVE_BINS])
 {
     int count = 0;
-    const int max_bin = AUDIO_PROC_PSD_BINS - 2;
+    const int max_bin = (int)(1950.0f / AUDIO_PROC_BIN_HZ);
+    const int min_bin = (int)(120.0f / AUDIO_PROC_BIN_HZ);
 
-    if (f0_bin > 2 && f0_bin < max_bin) {
-        const int harmonics[3] = { f0_bin, f0_bin * 2, f0_bin * 3 };
-        for (int h = 0; h < 3; h++) {
+    /* Helper: compute mean spectral magnitude across active mics at bin k */
+    if (f0_bin >= min_bin && f0_bin < max_bin) {
+        const int harmonics[4] = { f0_bin, f0_bin * 2, f0_bin * 3, f0_bin * 4 };
+        for (int h = 0; h < 4; h++) {
             int center = harmonics[h];
-            if (center >= max_bin) {
-                continue;
-            }
+            if (center >= max_bin) continue;
             for (int dk = -DOA_HARM_HALF_WIDTH; dk <= DOA_HARM_HALF_WIDTH; dk++) {
                 int k = center + dk;
-                if (k >= 4 && k < max_bin && count < DOA_MAX_ACTIVE_BINS) {
-                    bins_out[count++] = k;
+                if (k < min_bin || k >= max_bin || count >= DOA_MAX_ACTIVE_BINS) continue;
+                float mag_sum = 0.0f;
+                for (int m = 0; m < active_mics; m++) {
+                    float re = s_fft_ch[m][2 * k];
+                    float im = s_fft_ch[m][2 * k + 1];
+                    mag_sum += sqrtf(re * re + im * im);
+                }
+                bins_out[count]    = k;
+                weights_out[count] = 1.5f * sqrtf(mag_sum / (float)active_mics + 1e-12f);
+                count++;
+            }
+        }
+    }
+
+    /* Fill remaining slots with the strongest spectral bins across 140..1850 Hz
+     * (1 bin per ~80 Hz sub-band) so multipath interference averages out. */
+    const int band_step = 5; /* ~78 Hz per sub-band */
+    for (int k_start = min_bin; k_start + band_step < max_bin && count < DOA_MAX_ACTIVE_BINS; k_start += band_step) {
+        int   best_k   = -1;
+        float best_mag = 0.0f;
+        float min_mag  = 1e30f;
+
+        for (int k = k_start; k < k_start + band_step; k++) {
+            /* Skip if already added in harmonic pass */
+            bool dup = false;
+            for (int i = 0; i < count; i++) {
+                if (bins_out[i] == k) {
+                    dup = true;
+                    break;
                 }
             }
-        }
-    }
+            if (dup) continue;
 
-    if (count == 0) {
-        const float *psd = audio_processor_last_psd();
-        int k_min = (int)(110.0f / AUDIO_PROC_BIN_HZ);
-        int k_max = (int)(1500.0f / AUDIO_PROC_BIN_HZ);
-        int step  = (k_max - k_min) / 12;
-        if (step < 1) step = 1;
-        for (int k = k_min; k <= k_max && count < DOA_MAX_ACTIVE_BINS; k += step) {
-            if (psd == NULL || psd[k] > 0.0f) {
-                bins_out[count++] = k;
+            float mag_sum = 0.0f;
+            for (int m = 0; m < active_mics; m++) {
+                float re = s_fft_ch[m][2 * k];
+                float im = s_fft_ch[m][2 * k + 1];
+                mag_sum += sqrtf(re * re + im * im);
+            }
+            if (mag_sum < min_mag) min_mag = mag_sum;
+            if (mag_sum > best_mag) {
+                best_mag = mag_sum;
+                best_k   = k;
             }
         }
+
+        /* Only include sub-band peak if it stands out above its local floor */
+        if (best_k >= min_bin && best_mag > 1.8f * (min_mag + 1e-9f)) {
+            bins_out[count]    = best_k;
+            weights_out[count] = sqrtf(best_mag / (float)active_mics);
+            count++;
+        }
     }
 
+    /* Normalize weights so sum(weights) == 1.0 */
+    float w_sum = 0.0f;
+    for (int i = 0; i < count; i++) {
+        w_sum += weights_out[i];
+    }
+    if (w_sum > 1e-12f) {
+        for (int i = 0; i < count; i++) {
+            weights_out[i] /= w_sum;
+        }
+    }
     return count;
 }
 
@@ -153,30 +221,28 @@ esp_err_t doa_processor_estimate(const int32_t * const pcm_ch[],
     }
 
     memset(out, 0, sizeof(*out));
+    out->azimuth_deg   = (float)DOA_INVALID_DEG;
+    out->elevation_deg = (float)DOA_INVALID_DEG;
 
-    float ch_rms[DOA_MAX_MICS] = { 0 };
     int valid_mics = 0;
     for (int m = 0; m < num_mics; m++) {
         if (pcm_ch[m] == NULL) {
-            break;
+            continue;
         }
-        ch_rms[m] = prepare_channel_fft(s_fft_ch[m], pcm_ch[m], AUDIO_PROC_FFT_SIZE);
-        if (ch_rms[m] < DOA_MIN_CHAN_RMS) {
-            break;
+        out->rms_ch[m] = prepare_channel_fft(s_fft_ch[m], pcm_ch[m], AUDIO_PROC_FFT_SIZE);
+        if (out->rms_ch[m] >= DOA_MIN_CHAN_RMS) {
+            if (audio_processor_fft_forward(s_fft_ch[m]) == ESP_OK && valid_mics == m) {
+                valid_mics++;
+            }
         }
-        if (audio_processor_fft_forward(s_fft_ch[m]) != ESP_OK) {
-            break;
-        }
-        valid_mics++;
     }
 
-    out->rms_left  = ch_rms[0];
-    out->rms_right = ch_rms[1];
+    out->rms_left  = out->rms_ch[0];
+    out->rms_right = out->rms_ch[1];
 
     if (valid_mics < 2) {
         out->valid       = false;
         out->active_mics = valid_mics;
-        out->azimuth_deg = (float)DOA_INVALID_DEG;
         return ESP_OK;
     }
 
@@ -187,21 +253,29 @@ esp_err_t doa_processor_estimate(const int32_t * const pcm_ch[],
     const float d_m = spacing * 0.001f;
     const float r_m = 0.5f * d_m;
 
+    /* Microphone coordinates in meters:
+     * 4-mic cross ("kruisverband"):
+     *   Mic 0 (GPIO6, SEL=GND): Noord / Voor   (+r,  0) -> Azimuth 0°
+     *   Mic 1 (GPIO6, SEL=3V3): Zuid  / Achter (-r,  0) -> Azimuth 180°
+     *   Mic 2 (GPIO7, SEL=GND): Oost  / Rechts ( 0, +r) -> Azimuth 90°
+     *   Mic 3 (GPIO7, SEL=3V3): West  / Links  ( 0, -r) -> Azimuth 270°
+     */
     float mic_x[DOA_MAX_MICS] = { 0 };
     float mic_y[DOA_MAX_MICS] = { 0 };
 
     if (active_mics == 4) {
-        mic_x[0] = +r_m; mic_y[0] =  0.0f;
-        mic_x[1] =  0.0f; mic_y[1] = +r_m;
-        mic_x[2] = -r_m; mic_y[2] =  0.0f;
-        mic_x[3] =  0.0f; mic_y[3] = -r_m;
+        mic_x[0] = +r_m; mic_y[0] =  0.0f; /* Ch0: Noord (0°)   */
+        mic_x[1] = -r_m; mic_y[1] =  0.0f; /* Ch1: Zuid  (180°) */
+        mic_x[2] =  0.0f; mic_y[2] = +r_m; /* Ch2: Oost  (90°)  */
+        mic_x[3] =  0.0f; mic_y[3] = -r_m; /* Ch3: West  (270°) */
     } else {
-        mic_x[0] =  0.0f; mic_y[0] = -r_m; /* Mic 0 (SEL=GND): Left / 0°   */
-        mic_x[1] =  0.0f; mic_y[1] = +r_m; /* Mic 1 (SEL=3V3): Right / 180° */
+        mic_x[0] =  0.0f; mic_y[0] = -r_m; /* Ch0: Links  (0°)   */
+        mic_x[1] =  0.0f; mic_y[1] = +r_m; /* Ch1: Rechts (180°) */
     }
 
-    int bins[DOA_MAX_ACTIVE_BINS];
-    const int n_bins = select_active_bins(f0_bin, bins);
+    int   bins[DOA_MAX_ACTIVE_BINS];
+    float bin_weights[DOA_MAX_ACTIVE_BINS];
+    const int n_bins = select_active_bins_weighted(f0_bin, active_mics, bins, bin_weights);
     if (n_bins <= 0) {
         out->valid = false;
         return ESP_OK;
@@ -228,94 +302,146 @@ esp_err_t doa_processor_estimate(const int32_t * const pcm_ch[],
                 const float g_im = xp_im * xq_re - xp_re * xq_im;
                 const float mag  = sqrtf(g_re * g_re + g_im * g_im) + 1e-12f;
 
-                phat_re[n_pairs][b] = g_re / mag;
-                phat_im[n_pairs][b] = g_im / mag;
+                /* Weighted PHAT: unit phase vector scaled by bin SNR weight */
+                phat_re[n_pairs][b] = (g_re / mag) * bin_weights[b];
+                phat_im[n_pairs][b] = (g_im / mag) * bin_weights[b];
             }
             n_pairs++;
         }
     }
 
-    const int max_angle_deg = (active_mics == 4) ? 355 : 180;
-    const int coarse_step   = 5;
+    /* Step 1: Precompute 1D GCC-PHAT lookup table for each pair over [-tau_max, +tau_max] */
+    const float tau_max = (d_m / SPEED_OF_SOUND_MPS) * 1.05f;
+    const float inv_tau_max = (tau_max > 1e-9f) ? (1.0f / tau_max) : 1.0f;
+    const int   half_lut = (DOA_TAU_LUT_SIZE - 1) / 2;
 
-    float best_score = -1e9f;
-    int   best_deg   = 90;
-
-    for (int deg = 0; deg <= max_angle_deg; deg += coarse_step) {
-        const float rad = (float)deg * ((float)M_PI / 180.0f);
-        const float ux  = (active_mics == 4) ? cosf(rad) : sinf(rad);
-        const float uy  = (active_mics == 4) ? sinf(rad) : -cosf(rad);
-
-        float score = 0.0f;
-        for (int pr = 0; pr < n_pairs; pr++) {
-            const float tau_pq = (pair_dx[pr] * ux + pair_dy[pr] * uy) / SPEED_OF_SOUND_MPS;
+    for (int pr = 0; pr < n_pairs; pr++) {
+        for (int ti = 0; ti < DOA_TAU_LUT_SIZE; ti++) {
+            const float tau = ((float)(ti - half_lut) / (float)half_lut) * tau_max;
+            float acc = 0.0f;
             for (int b = 0; b < n_bins; b++) {
                 const float freq_hz = (float)bins[b] * AUDIO_PROC_BIN_HZ;
-                const float phase   = 2.0f * (float)M_PI * freq_hz * tau_pq;
-                score += phat_re[pr][b] * cosf(phase) + phat_im[pr][b] * sinf(phase);
+                const float phase   = 2.0f * (float)M_PI * freq_hz * tau;
+                acc += phat_re[pr][b] * cosf(phase) + phat_im[pr][b] * sinf(phase);
             }
-        }
-
-        if (score > best_score) {
-            best_score = score;
-            best_deg   = deg;
+            s_gcc_lut[pr][ti] = acc;
         }
     }
 
-    int fine_best_deg = best_deg;
-    for (int d = best_deg - 4; d <= best_deg + 4; d++) {
-        int deg = d;
-        if (active_mics == 4) {
-            deg = (deg + 360) % 360;
-        } else {
-            if (deg < 0 || deg > 180) continue;
-        }
+    /* Step 2: 2D search over Azimuth (and Elevation when active_mics == 4) using LUT */
+    float best_score    = -1e9f;
+    int   best_az_deg   = (active_mics == 4) ? 0 : 90;
+    int   best_elev_deg = 0;
 
-        const float rad = (float)deg * ((float)M_PI / 180.0f);
-        const float ux  = (active_mics == 4) ? cosf(rad) : sinf(rad);
-        const float uy  = (active_mics == 4) ? sinf(rad) : -cosf(rad);
+    if (active_mics == 4) {
+        /* Coarse 2D grid: Azimuth 0..355 (step 5°), Elevation 0..85 (step 5°) */
+        for (int el = 0; el <= 85; el += 5) {
+            const float cos_el = cosf((float)el * ((float)M_PI / 180.0f));
+            for (int az = 0; az < 360; az += 5) {
+                const float rad = (float)az * ((float)M_PI / 180.0f);
+                const float ux  = cosf(rad) * cos_el;
+                const float uy  = sinf(rad) * cos_el;
 
-        float score = 0.0f;
-        for (int pr = 0; pr < n_pairs; pr++) {
-            const float tau_pq = (pair_dx[pr] * ux + pair_dy[pr] * uy) / SPEED_OF_SOUND_MPS;
-            for (int b = 0; b < n_bins; b++) {
-                const float freq_hz = (float)bins[b] * AUDIO_PROC_BIN_HZ;
-                const float phase   = 2.0f * (float)M_PI * freq_hz * tau_pq;
-                score += phat_re[pr][b] * cosf(phase) + phat_im[pr][b] * sinf(phase);
+                float score = 0.0f;
+                for (int pr = 0; pr < n_pairs; pr++) {
+                    const float tau_pq = (pair_dx[pr] * ux + pair_dy[pr] * uy) / SPEED_OF_SOUND_MPS;
+                    float f_idx = (tau_pq * inv_tau_max) * (float)half_lut + (float)half_lut;
+                    int idx = (int)(f_idx + 0.5f);
+                    if (idx < 0) idx = 0;
+                    if (idx >= DOA_TAU_LUT_SIZE) idx = DOA_TAU_LUT_SIZE - 1;
+                    score += s_gcc_lut[pr][idx];
+                }
+                if (score > best_score) {
+                    best_score    = score;
+                    best_az_deg   = az;
+                    best_elev_deg = el;
+                }
             }
         }
-        if (score > best_score) {
-            best_score    = score;
-            fine_best_deg = deg;
+
+        /* Fine 2D refinement (1° steps in Azimuth and Elevation around coarse winner) */
+        const int c_az = best_az_deg;
+        const int c_el = best_elev_deg;
+        for (int el = c_el - 4; el <= c_el + 4; el++) {
+            if (el < 0 || el > 90) continue;
+            const float cos_el = cosf((float)el * ((float)M_PI / 180.0f));
+            for (int d_az = c_az - 4; d_az <= c_az + 4; d_az++) {
+                const int az = (d_az + 360) % 360;
+                const float rad = (float)az * ((float)M_PI / 180.0f);
+                const float ux  = cosf(rad) * cos_el;
+                const float uy  = sinf(rad) * cos_el;
+
+                float score = 0.0f;
+                for (int pr = 0; pr < n_pairs; pr++) {
+                    const float tau_pq = (pair_dx[pr] * ux + pair_dy[pr] * uy) / SPEED_OF_SOUND_MPS;
+                    float f_idx = (tau_pq * inv_tau_max) * (float)half_lut + (float)half_lut;
+                    int idx = (int)(f_idx + 0.5f);
+                    if (idx < 0) idx = 0;
+                    if (idx >= DOA_TAU_LUT_SIZE) idx = DOA_TAU_LUT_SIZE - 1;
+                    score += s_gcc_lut[pr][idx];
+                }
+                if (score > best_score) {
+                    best_score    = score;
+                    best_az_deg   = az;
+                    best_elev_deg = el;
+                }
+            }
+        }
+    } else {
+        /* 2-mic 1D search: 0..180 deg at 1° resolution */
+        for (int az = 0; az <= 180; az++) {
+            const float rad = (float)az * ((float)M_PI / 180.0f);
+            const float ux  = sinf(rad);
+            const float uy  = -cosf(rad);
+            const float tau_pq = (pair_dx[0] * ux + pair_dy[0] * uy) / SPEED_OF_SOUND_MPS;
+            float f_idx = (tau_pq * inv_tau_max) * (float)half_lut + (float)half_lut;
+            int idx = (int)(f_idx + 0.5f);
+            if (idx < 0) idx = 0;
+            if (idx >= DOA_TAU_LUT_SIZE) idx = DOA_TAU_LUT_SIZE - 1;
+            const float score = s_gcc_lut[0][idx];
+            if (score > best_score) {
+                best_score  = score;
+                best_az_deg = az;
+            }
         }
     }
 
-    const float max_possible = (float)(n_pairs * n_bins);
-    float coherence = (max_possible > 0.0f) ? (best_score / max_possible) : 0.0f;
+    float coherence = (n_pairs > 0) ? (best_score / (float)n_pairs) : 0.0f;
     if (coherence < 0.0f) coherence = 0.0f;
     if (coherence > 1.0f) coherence = 1.0f;
 
-    const float est_rad = (float)fine_best_deg * ((float)M_PI / 180.0f);
+    /* Coherence-weighted EMA smoothing so reflections with low coherence don't jerk the angle */
+    float alpha = DOA_EMA_ALPHA_BASE * (0.35f + 0.65f * coherence);
+    if (alpha > 0.65f) alpha = 0.65f;
+    if (alpha < 0.12f) alpha = 0.12f;
+
+    const float est_rad = (float)best_az_deg * ((float)M_PI / 180.0f);
     if (!s_ema_init) {
-        s_ema_sin  = sinf(est_rad);
-        s_ema_cos  = cosf(est_rad);
-        s_ema_init = true;
+        s_ema_sin      = sinf(est_rad);
+        s_ema_cos      = cosf(est_rad);
+        s_ema_elev_deg = (float)best_elev_deg;
+        s_ema_init     = true;
     } else {
-        s_ema_sin = DOA_EMA_ALPHA * sinf(est_rad) + (1.0f - DOA_EMA_ALPHA) * s_ema_sin;
-        s_ema_cos = DOA_EMA_ALPHA * cosf(est_rad) + (1.0f - DOA_EMA_ALPHA) * s_ema_cos;
+        /* At very high elevation (>80°), azimuth becomes geometric zenith; freeze azimuth drift */
+        if (active_mics < 4 || best_elev_deg <= 82) {
+            s_ema_sin = alpha * sinf(est_rad) + (1.0f - alpha) * s_ema_sin;
+            s_ema_cos = alpha * cosf(est_rad) + (1.0f - alpha) * s_ema_cos;
+        }
+        s_ema_elev_deg = alpha * (float)best_elev_deg + (1.0f - alpha) * s_ema_elev_deg;
     }
 
-    float smooth_deg = atan2f(s_ema_sin, s_ema_cos) * (180.0f / (float)M_PI);
-    if (smooth_deg < 0.0f) {
-        smooth_deg += 360.0f;
+    float smooth_az = atan2f(s_ema_sin, s_ema_cos) * (180.0f / (float)M_PI);
+    if (smooth_az < 0.0f) {
+        smooth_az += 360.0f;
     }
-    if (active_mics == 2 && smooth_deg > 180.0f) {
-        smooth_deg = (smooth_deg > 270.0f) ? 0.0f : 180.0f;
+    if (active_mics == 2 && smooth_az > 180.0f) {
+        smooth_az = (smooth_az > 270.0f) ? 0.0f : 180.0f;
     }
 
-    out->valid       = true;
-    out->azimuth_deg = smooth_deg;
-    out->confidence  = coherence;
+    out->valid         = true;
+    out->azimuth_deg   = smooth_az;
+    out->elevation_deg = (active_mics == 4) ? s_ema_elev_deg : (float)DOA_INVALID_DEG;
+    out->confidence    = coherence;
     return ESP_OK;
 }
 
@@ -326,11 +452,11 @@ void doa_simulate_multichannel_pcm(int32_t *pcm_ch[],
                                    float f0_hz,
                                    float azimuth_deg)
 {
-    const float d_m = (mic_spacing_mm > 10.0f ? mic_spacing_mm : 100.0f) * 0.001f;
+    const float d_m = (mic_spacing_mm > 10.0f ? mic_spacing_mm : 83.0f) * 0.001f;
     const float r_m = 0.5f * d_m;
 
-    float mic_x[DOA_MAX_MICS] = { +r_m, 0.0f, -r_m, 0.0f };
-    float mic_y[DOA_MAX_MICS] = { 0.0f, +r_m, 0.0f, -r_m };
+    float mic_x[DOA_MAX_MICS] = { +r_m, -r_m,  0.0f,  0.0f };
+    float mic_y[DOA_MAX_MICS] = { 0.0f,  0.0f, +r_m, -r_m };
     if (num_mics == 2) {
         mic_x[0] = 0.0f; mic_y[0] = -r_m;
         mic_x[1] = 0.0f; mic_y[1] = +r_m;
