@@ -18,6 +18,7 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "nvs.h"
 #include "sdkconfig.h"
@@ -113,6 +114,11 @@ static esp_err_t i2s_microphone_init(void)
         return err;
     }
 
+    /* INMP441 / ICS-43434 datasheets require a pull-down on SD (DOUT) during
+     * High-Z tri-state slots; disable ESP32-S3's default internal pull-up. */
+    gpio_pullup_dis(I2S_MIC_DIN_GPIO);
+    gpio_pulldown_en(I2S_MIC_DIN_GPIO);
+
     /* Initialize second stereo bus (I2S_NUM_1) as Slave clocked by GPIO 4 & GPIO 5 */
     i2s_chan_config_t chan1_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_SLAVE);
     chan1_cfg.dma_desc_num  = 6;
@@ -122,6 +128,8 @@ static esp_err_t i2s_microphone_init(void)
         i2s_std_config_t std1_cfg = std0_cfg;
         std1_cfg.gpio_cfg.din = I2S_MIC_DIN2_GPIO;
         if (i2s_channel_init_std_mode(s_rx1, &std1_cfg) == ESP_OK) {
+            gpio_pullup_dis(I2S_MIC_DIN2_GPIO);
+            gpio_pulldown_en(I2S_MIC_DIN2_GPIO);
             /* Enable slave first so it starts on the very first clock edge from master */
             i2s_channel_enable(s_rx1);
         } else {
@@ -190,6 +198,21 @@ static bool read_pcm_chunk_bytes(i2s_chan_handle_t chan, uint8_t *dst, size_t ne
     return true;
 }
 
+/**
+ * Sanitize raw 32-bit I2S slot word from 24-bit MEMS microphones (INMP441 / ICS-43434):
+ *   1. Sign-extend from bit 28 into bits [31:29]:
+ *      When two INMP441s share one SD line, the first MSB clock edge after the
+ *      8-bit High-Z tri-state gap can retain the bus pull state (1 or 0), causing
+ *      full-scale 0x80000000 spikes (RMS ~0.578 or ~0.044) on zero-crossings.
+ *      Bits [28:8] are 100% settled and preserve full dynamic range up to 102 dB SPL.
+ *   2. Mask off bits [7:0], which are High-Z tri-state padding after the 24-bit word.
+ */
+static inline int32_t sanitize_i2s_24bit_sample(int32_t raw)
+{
+    int32_t s = ((int32_t)((uint32_t)raw << 3)) >> 3;
+    return s & ~0xFF;
+}
+
 /** Read 4 channels from I2S_NUM_0 (DIN=GPIO6: Ch0, Ch1) and I2S_NUM_1 (DIN2=GPIO7: Ch2, Ch3). */
 static bool read_pcm_frame_quad_i32(int32_t *out_ch0, int32_t *out_ch1,
                                     int32_t *out_ch2, int32_t *out_ch3, int n)
@@ -210,14 +233,14 @@ static bool read_pcm_frame_quad_i32(int32_t *out_ch0, int32_t *out_ch1,
     const unsigned ch_r = 1u;
 #endif
     for (int i = 0; i < n; i++) {
-        out_ch0[i] = s_stereo[i * 2 + ch_l];
-        out_ch1[i] = s_stereo[i * 2 + ch_r];
+        out_ch0[i] = sanitize_i2s_24bit_sample(s_stereo[i * 2 + ch_l]);
+        out_ch1[i] = sanitize_i2s_24bit_sample(s_stereo[i * 2 + ch_r]);
     }
 
     if (s_rx1 != NULL && read_pcm_chunk_bytes(s_rx1, (uint8_t *)s_stereo1, need_bytes, 100)) {
         for (int i = 0; i < n; i++) {
-            out_ch2[i] = s_stereo1[i * 2 + ch_l];
-            out_ch3[i] = s_stereo1[i * 2 + ch_r];
+            out_ch2[i] = sanitize_i2s_24bit_sample(s_stereo1[i * 2 + ch_l]);
+            out_ch3[i] = sanitize_i2s_24bit_sample(s_stereo1[i * 2 + ch_r]);
         }
     } else {
         memset(out_ch2, 0, (size_t)n * sizeof(int32_t));
