@@ -188,76 +188,6 @@ void audio_task_request_recalibration(void)
     s_recalibration_requested = true;
 }
 
-static void run_microphone_calibration(void)
-{
-    const int CAL_FRAMES = 32;
-    double raw_rms_sum[4] = { 0.0, 0.0, 0.0, 0.0 };
-    int32_t *mics[4] = { s_raw, s_raw_right, s_raw_ch2, s_raw_ch3 };
-
-    ESP_LOGI(TAG, "Starting 4-mic calibration (2.0s ambient measurement)...");
-
-    /* Discard initial 8 frames (~500ms) to let MEMS mic charge pumps stabilize */
-    for (int i = 0; i < 8; i++) {
-        read_pcm_frame_quad_i32(s_raw, s_raw_right, s_raw_ch2, s_raw_ch3, FRAME_SAMPLES);
-    }
-
-    int valid_frames = 0;
-    for (int f = 0; f < CAL_FRAMES; f++) {
-        if (!read_pcm_frame_quad_i32(s_raw, s_raw_right, s_raw_ch2, s_raw_ch3, FRAME_SAMPLES)) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        for (int m = 0; m < 4; m++) {
-            raw_rms_sum[m] += (double)raw_i32_rms_norm(mics[m], FRAME_SAMPLES);
-        }
-        valid_frames++;
-    }
-
-    if (valid_frames < 10) {
-        ESP_LOGW(TAG, "Calibration skipped: insufficient valid I2S frames (%d)", valid_frames);
-        return;
-    }
-
-    float avg_rms[4];
-    float total_rms = 0.0f;
-    int valid_mics_cnt = 0;
-    for (int m = 0; m < 4; m++) {
-        avg_rms[m] = (float)(raw_rms_sum[m] / (double)valid_frames);
-        if (avg_rms[m] > 1e-6f) {
-            total_rms += avg_rms[m];
-            valid_mics_cnt++;
-        }
-    }
-
-    if (valid_mics_cnt > 0) {
-        float mean_target = total_rms / (float)valid_mics_cnt;
-        static const char * const mic_names[4] = {
-            "Mic0 Noord (DIN=6, SEL=GND)",
-            "Mic1 Zuid  (DIN=6, SEL=3V3)",
-            "Mic2 Oost  (DIN=7, SEL=GND)",
-            "Mic3 West  (DIN=7, SEL=3V3)"
-        };
-        ESP_LOGI(TAG, "=== 4-Mic Calibration (Target RMS: %.5f) ===", mean_target);
-        for (int m = 0; m < 4; m++) {
-            float trim = 1.0f;
-            if (avg_rms[m] > 1e-6f) {
-                trim = mean_target / avg_rms[m];
-                if (trim < 0.30f) trim = 0.30f;
-                if (trim > 3.00f) trim = 3.00f;
-            }
-            audio_processor_set_channel_trim(m, trim);
-            float db_adj = 20.0f * log10f(trim);
-            ESP_LOGI(TAG, "  %s: raw=%.5f -> trim=%.2fx (%+.1f dB)",
-                     mic_names[m], avg_rms[m], trim, db_adj);
-        }
-
-        float base_noise = mean_target * audio_processor_get_gain();
-        audio_processor_set_noise_floor_baseline(base_noise);
-        ESP_LOGI(TAG, "  Ambient noise baseline: rms=%.5f", base_noise);
-        ESP_LOGI(TAG, "=============================================");
-    }
-}
-
 static bool read_pcm_chunk_bytes(i2s_chan_handle_t chan, uint8_t *dst, size_t need_bytes, uint32_t timeout_ms)
 {
     if (chan == NULL) {
@@ -349,6 +279,76 @@ static void push_event(DroneEventType type, float ratio, int active, float rms,
     };
     if (xQueueSend(g_drone_event_queue, &ev, 0) != pdTRUE) {
         ESP_LOGW(TAG, "event queue full — dropped 0x%02X", (unsigned)type);
+    }
+}
+
+static void run_microphone_calibration(void)
+{
+    const int CAL_FRAMES = 32;
+    double raw_rms_sum[4] = { 0.0, 0.0, 0.0, 0.0 };
+    int32_t *mics[4] = { s_raw, s_raw_right, s_raw_ch2, s_raw_ch3 };
+
+    ESP_LOGI(TAG, "Starting 4-mic calibration (2.0s ambient measurement)...");
+
+    /* Discard initial 8 frames (~500ms) to let MEMS mic charge pumps stabilize */
+    for (int i = 0; i < 8; i++) {
+        read_pcm_frame_quad_i32(s_raw, s_raw_right, s_raw_ch2, s_raw_ch3, FRAME_SAMPLES);
+    }
+
+    int valid_frames = 0;
+    for (int f = 0; f < CAL_FRAMES; f++) {
+        if (!read_pcm_frame_quad_i32(s_raw, s_raw_right, s_raw_ch2, s_raw_ch3, FRAME_SAMPLES)) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        for (int m = 0; m < 4; m++) {
+            raw_rms_sum[m] += (double)raw_i32_rms_norm(mics[m], FRAME_SAMPLES);
+        }
+        valid_frames++;
+    }
+
+    if (valid_frames < 10) {
+        ESP_LOGW(TAG, "Calibration skipped: insufficient valid I2S frames (%d)", valid_frames);
+        return;
+    }
+
+    float avg_rms[4];
+    float total_rms = 0.0f;
+    int valid_mics_cnt = 0;
+    for (int m = 0; m < 4; m++) {
+        avg_rms[m] = (float)(raw_rms_sum[m] / (double)valid_frames);
+        if (avg_rms[m] > 1e-6f) {
+            total_rms += avg_rms[m];
+            valid_mics_cnt++;
+        }
+    }
+
+    if (valid_mics_cnt > 0) {
+        float mean_target = total_rms / (float)valid_mics_cnt;
+        static const char * const mic_names[4] = {
+            "Mic0 Noord (DIN=6, SEL=GND)",
+            "Mic1 Zuid  (DIN=6, SEL=3V3)",
+            "Mic2 Oost  (DIN=7, SEL=GND)",
+            "Mic3 West  (DIN=7, SEL=3V3)"
+        };
+        ESP_LOGI(TAG, "=== 4-Mic Calibration (Target RMS: %.5f) ===", mean_target);
+        for (int m = 0; m < 4; m++) {
+            float trim = 1.0f;
+            if (avg_rms[m] > 1e-6f) {
+                trim = mean_target / avg_rms[m];
+                if (trim < 0.30f) trim = 0.30f;
+                if (trim > 3.00f) trim = 3.00f;
+            }
+            audio_processor_set_channel_trim(m, trim);
+            float db_adj = 20.0f * log10f(trim);
+            ESP_LOGI(TAG, "  %s: raw=%.5f -> trim=%.2fx (%+.1f dB)",
+                     mic_names[m], avg_rms[m], trim, db_adj);
+        }
+
+        float base_noise = mean_target * audio_processor_get_gain();
+        audio_processor_set_noise_floor_baseline(base_noise);
+        ESP_LOGI(TAG, "  Ambient noise baseline: rms=%.5f", base_noise);
+        ESP_LOGI(TAG, "=============================================");
     }
 }
 

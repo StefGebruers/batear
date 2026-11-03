@@ -47,7 +47,7 @@ static int hex_nibble(char c)
     return -1;
 }
 
-static bool hex_to_bytes(const char *hex, uint8_t *out, size_t out_len)
+static __attribute__((unused)) bool hex_to_bytes(const char *hex, uint8_t *out, size_t out_len)
 {
     if (strlen(hex) != out_len * 2) return false;
     for (size_t i = 0; i < out_len; i++) {
@@ -59,7 +59,7 @@ static bool hex_to_bytes(const char *hex, uint8_t *out, size_t out_len)
     return true;
 }
 
-static void print_hex(const uint8_t *data, size_t len)
+static __attribute__((unused)) void print_hex(const uint8_t *data, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
         printf("%02X", data[i]);
@@ -81,8 +81,8 @@ static void print_nvs_str(nvs_handle_t h, const char *key, const char *label)
     }
 }
 
-static void print_nvs_blob_hex(nvs_handle_t h, const char *key,
-                                const char *label, size_t expected_len)
+static __attribute__((unused)) void print_nvs_blob_hex(nvs_handle_t h, const char *key,
+                                                        const char *label, size_t expected_len)
 {
     uint8_t buf[32];
     size_t len = expected_len;
@@ -106,7 +106,7 @@ static void print_nvs_u8(nvs_handle_t h, const char *key, const char *label)
     }
 }
 
-static void print_nvs_u8_hex(nvs_handle_t h, const char *key, const char *label)
+static __attribute__((unused)) void print_nvs_u8_hex(nvs_handle_t h, const char *key, const char *label)
 {
     uint8_t val;
     if (nvs_get_u8(h, key, &val) == ESP_OK) {
@@ -116,8 +116,8 @@ static void print_nvs_u8_hex(nvs_handle_t h, const char *key, const char *label)
     }
 }
 
-static void print_nvs_u32(nvs_handle_t h, const char *key, const char *label,
-                           const char *unit)
+static __attribute__((unused)) void print_nvs_u32(nvs_handle_t h, const char *key, const char *label,
+                                                   const char *unit)
 {
     uint32_t val;
     if (nvs_get_u32(h, key, &val) == ESP_OK) {
@@ -349,7 +349,7 @@ static int set_nvs_u8(const char *ns, const char *key, uint8_t value)
     return 0;
 }
 
-static int set_nvs_u32(const char *ns, const char *key, uint32_t value)
+static __attribute__((unused)) int set_nvs_u32(const char *ns, const char *key, uint32_t value)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
@@ -369,8 +369,8 @@ static int set_nvs_u32(const char *ns, const char *key, uint32_t value)
     return 0;
 }
 
-static int set_nvs_blob(const char *ns, const char *key,
-                         const uint8_t *data, size_t len)
+static __attribute__((unused)) int set_nvs_blob(const char *ns, const char *key,
+                                                 const uint8_t *data, size_t len)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(ns, NVS_READWRITE, &h);
