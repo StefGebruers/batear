@@ -110,17 +110,85 @@ static void hw_display_init(void)
 #endif
 }
 
+static void get_gps_status_tag(char *dst, size_t sz)
+{
+    GpsLocation_t loc = {};
+    gps_get_location(&loc);
+    if (loc.has_fix) {
+        if (loc.sats > 0) {
+            snprintf(dst, sz, "GPS:FIX(%u)", (unsigned)loc.sats);
+        } else {
+            snprintf(dst, sz, "GPS:FIX");
+        }
+    } else if (loc.is_sleeping) {
+        snprintf(dst, sz, "GPS:SLP");
+    } else if (loc.sats > 0) {
+        snprintf(dst, sz, "GPS:%uS", (unsigned)loc.sats);
+    } else if (loc.bytes_rx > 0) {
+        snprintf(dst, sz, "GPS:SEEK");
+    } else {
+        snprintf(dst, sz, "GPS:--");
+    }
+}
+
 static void hw_display_status(const char *line2, const char *line4, const char *line6)
 {
 #if defined(PIN_OLED_SDA)
+    char header[32];
+    char gps_tag[16];
+    get_gps_status_tag(gps_tag, sizeof(gps_tag));
+    snprintf(header, sizeof(header), "BATEAR%*s", 15, gps_tag);
+
     oled_clear();
-    oled_print(0, 0, "BATEAR WIFI DET");
+    oled_print(0, 0, header);
     if (line2) oled_print(0, 2, line2);
     if (line4) oled_print(0, 4, line4);
     if (line6) oled_print(0, 6, line6);
     oled_flush();
 #else
     (void)line2; (void)line4; (void)line6;
+#endif
+}
+
+static void hw_display_idle(void)
+{
+#if defined(PIN_OLED_SDA)
+    char line[48];
+    char gps_tag[16];
+    get_gps_status_tag(gps_tag, sizeof(gps_tag));
+
+    oled_clear();
+    snprintf(line, sizeof(line), "BATEAR%*s", 15, gps_tag);
+    oled_print(0, 0, line);
+
+    snprintf(line, sizeof(line), "ID:%.8s %s", s_device_id,
+             s_mqtt_connected ? "MQTT:OK" : "MQTT:--");
+    oled_print(0, 2, line);
+
+    if (s_ip_str[0]) {
+        snprintf(line, sizeof(line), "IP:%.15s", s_ip_str);
+    } else {
+        snprintf(line, sizeof(line), "WiFi: Connecting...");
+    }
+    oled_print(0, 4, line);
+
+    GpsLocation_t loc = {};
+    gps_get_location(&loc);
+    if (loc.has_fix) {
+        snprintf(line, sizeof(line), "%.4f,%.4f %um",
+                 loc.latitude, loc.longitude, (unsigned)loc.altitude_m);
+    } else if (loc.is_sleeping) {
+        snprintf(line, sizeof(line), "%.4f,%.4f [SLP]",
+                 loc.latitude, loc.longitude);
+    } else if (loc.sats > 0) {
+        snprintf(line, sizeof(line), "GPS: %u Sats seen", (unsigned)loc.sats);
+    } else if (loc.bytes_rx > 0) {
+        snprintf(line, sizeof(line), "GPS: Seeking fix..");
+    } else {
+        snprintf(line, sizeof(line), "GPS: No UART data");
+    }
+    oled_print(0, 6, line);
+    oled_flush();
 #endif
 }
 
@@ -132,9 +200,18 @@ static void hw_display_event(const DroneEvent_t *ev)
 #endif
 
 #if defined(PIN_OLED_SDA)
+    if (!alarm) {
+        hw_display_idle();
+        return;
+    }
+
     char line[48];
+    char gps_tag[16];
+    get_gps_status_tag(gps_tag, sizeof(gps_tag));
+
     oled_clear();
-    oled_print(0, 0, alarm ? "!! DRONE ALARM !!" : "BATEAR WIFI DET");
+    snprintf(line, sizeof(line), "!ALARM!%*s", 14, gps_tag);
+    oled_print(0, 0, line);
 
     snprintf(line, sizeof(line), "ID:%.8s %s", s_device_id,
              s_mqtt_connected ? "MQTT:OK" : "MQTT:--");
@@ -145,7 +222,7 @@ static void hw_display_event(const DroneEvent_t *ev)
              (unsigned)rms_to_db(ev->rms), f0_hz);
     oled_print(0, 4, line);
 
-    if (alarm && ev->doa_deg >= 0) {
+    if (ev->doa_deg >= 0) {
         if (ev->doa_elev_deg >= 0) {
             snprintf(line, sizeof(line), "Az:%d(%s) El:%dd",
                      (int)ev->doa_deg,
@@ -157,12 +234,7 @@ static void hw_display_event(const DroneEvent_t *ev)
                      doa_angle_to_cardinal(ev->doa_deg, ev->active_mics));
         }
     } else {
-        GpsLocation_t loc;
-        if (gps_get_location(&loc) && loc.has_fix) {
-            snprintf(line, sizeof(line), "IP:%.9s G:FIX%u", s_ip_str, (unsigned)loc.sats);
-        } else {
-            snprintf(line, sizeof(line), "IP:%.15s", s_ip_str);
-        }
+        snprintf(line, sizeof(line), "DoA: ---");
     }
     oled_print(0, 6, line);
     oled_flush();
@@ -561,12 +633,6 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         s_mqtt_connected = true;
         esp_mqtt_client_publish(s_mqtt, s_topic_avail, "online", 0, 1, 1);
         publish_ha_discovery();
-        {
-            char l2[48], l4[48];
-            snprintf(l2, sizeof(l2), "ID:%.8s MQTT:OK", s_device_id);
-            snprintf(l4, sizeof(l4), "IP:%.15s", s_ip_str);
-            hw_display_status(l2, l4, "Listening (16kHz)");
-        }
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -621,9 +687,20 @@ extern "C" void WifiMqttTask(void *pvParameters)
     DroneEvent_t ev;
     char json[450];
     uint16_t tx_seq = 1;
+    bool in_alarm = false;
+    int64_t last_alarm_time_us = 0;
+
+    hw_display_idle();
 
     for (;;) {
-        if (xQueueReceive(g_drone_event_queue, &ev, pdMS_TO_TICKS(5000)) == pdTRUE) {
+        if (xQueueReceive(g_drone_event_queue, &ev, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            if (ev.type == DRONE_EVENT_ALARM) {
+                in_alarm = true;
+                last_alarm_time_us = esp_timer_get_time();
+            } else if (ev.type == DRONE_EVENT_CLEAR) {
+                in_alarm = false;
+            }
+
             hw_display_event(&ev);
 
             GpsLocation_t loc;
@@ -704,6 +781,17 @@ extern "C" void WifiMqttTask(void *pvParameters)
 
             esp_mqtt_client_publish(s_mqtt, s_topic_status, json, 0, 1, 1);
             ESP_LOGI(TAG, "pub → %s : %s", s_topic_status, json);
+        } else {
+            /* 1000ms timeout with no new events: keep display fresh */
+            if (in_alarm && (esp_timer_get_time() - last_alarm_time_us) > 4000000LL) {
+                in_alarm = false;
+#if defined(PIN_LED)
+                gpio_set_level((gpio_num_t)PIN_LED, 0);
+#endif
+            }
+            if (!in_alarm) {
+                hw_display_idle();
+            }
         }
     }
 }
