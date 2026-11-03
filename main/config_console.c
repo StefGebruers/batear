@@ -607,6 +607,14 @@ static int cmd_gps(int argc, char **argv)
     printf("  Longitude:  %.6f\n", loc.longitude);
     printf("  Altitude:   %.1f m\n", (double)loc.altitude_m);
     printf("  UTC Time:   %s\n", loc.iso_time[0] ? loc.iso_time : "(not synchronized)");
+    printf("  UART stats: %lu bytes, %lu sentences parsed\n",
+           (unsigned long)loc.bytes_rx, (unsigned long)loc.sentences_rx);
+    if (loc.bytes_rx == 0 && !loc.is_sleeping) {
+        printf("  [!] WARNING: 0 bytes received! Check wiring:\n");
+        printf("      GPS TX  -> Heltec GPIO 2 (PIN_GPS_RX)\n");
+        printf("      GPS RX  -> Heltec GPIO 3 (PIN_GPS_TX)\n");
+        printf("      GPS VCC -> 3V3 of 5V, GPS GND -> GND\n");
+    }
     printf("\nUse 'gps fix' to wake GPS and acquire a fresh fix.\n\n");
     return 0;
 }

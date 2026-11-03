@@ -483,8 +483,11 @@ void AudioTask(void *pvParameters)
         const int16_t doa_elev_deg = (doa_res.valid && doa_res.elevation_deg >= 0.0f)
                                      ? (int16_t)lrintf(doa_res.elevation_deg) : -1;
         const uint8_t active_mics  = (uint8_t)doa_res.active_mics;
+        const int sens_lvl = audio_processor_get_sensitivity();
+        const float min_gate = (sens_lvl >= 5) ? 0.00008f :
+                               (sens_lvl == 4) ? 0.00015f : RMS_MIN;
 
-        if (rms < RMS_MIN) {
+        if (rms < min_gate) {
             s_conf_ema *= (1.f - EMA_ALPHA);
             if (alarm) {
                 sustain_off++;
@@ -504,7 +507,6 @@ void AudioTask(void *pvParameters)
             }
 
             const int active_metric = harm_ok ? 1 : 0;
-            const int sens_lvl = audio_processor_get_sensitivity();
             const float conf_on_thresh = (sens_lvl >= 5) ? 0.20f :
                                          (sens_lvl == 4) ? 0.24f : CONF_ON;
             const int sustain_on_req   = (sens_lvl >= 4) ? 2 : SUSTAIN_FRAMES_ON;

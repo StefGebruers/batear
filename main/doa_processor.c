@@ -30,7 +30,7 @@ static const char *TAG = "doa";
 #define DOA_TAU_LUT_SIZE    121
 
 /* Base EMA smoothing factor for azimuth and elevation (scaled by coherence) */
-#define DOA_EMA_ALPHA_BASE  0.42f
+#define DOA_EMA_ALPHA_BASE  0.15f
 
 /* Working FFT buffers for up to 4 channels (interleaved complex float: 2 * 1024 floats each) */
 static float __attribute__((aligned(16))) s_fft_ch[DOA_MAX_MICS][2 * AUDIO_PROC_FFT_SIZE];
@@ -470,16 +470,26 @@ esp_err_t doa_processor_estimate(const int32_t * const pcm_ch[],
 
     /* Coherence-weighted EMA smoothing so reflections with low coherence don't jerk the angle */
     float alpha = DOA_EMA_ALPHA_BASE * (0.35f + 0.65f * coherence);
-    if (alpha > 0.65f) alpha = 0.65f;
-    if (alpha < 0.12f) alpha = 0.12f;
+    if (alpha > 0.20f) alpha = 0.20f;
+    if (alpha < 0.06f) alpha = 0.06f;
 
-    const float est_rad = (float)best_az_deg * ((float)M_PI / 180.0f);
     if (!s_ema_init) {
+        const float est_rad = (float)best_az_deg * ((float)M_PI / 180.0f);
         s_ema_sin      = sinf(est_rad);
         s_ema_cos      = cosf(est_rad);
         s_ema_elev_deg = (float)best_elev_deg;
         s_ema_init     = true;
     } else {
+        /* Slew-rate limiter on raw input: prevent acoustic reflections from jumping >12° per 10ms */
+        float cur_az = atan2f(s_ema_sin, s_ema_cos) * (180.0f / (float)M_PI);
+        if (cur_az < 0.0f) cur_az += 360.0f;
+        float diff = (float)best_az_deg - cur_az;
+        while (diff > 180.0f)  diff -= 360.0f;
+        while (diff < -180.0f) diff += 360.0f;
+        if (diff > 12.0f)  best_az_deg = (int)(cur_az + 12.0f + 0.5f);
+        if (diff < -12.0f) best_az_deg = (int)(cur_az - 12.0f + 0.5f);
+
+        const float est_rad = (float)best_az_deg * ((float)M_PI / 180.0f);
         /* At very high elevation (>80°), azimuth becomes geometric zenith; freeze azimuth drift */
         if (active_mics < 4 || best_elev_deg <= 82) {
             s_ema_sin = alpha * sinf(est_rad) + (1.0f - alpha) * s_ema_sin;

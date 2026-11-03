@@ -42,8 +42,8 @@ static const SensitivityProfile s_profiles[5] = {
     /* 1: Strict (original-like) */ { 8.0f, 14.0f, 8.0f, 6.0f, 0.050f, 0.025f, 22.0f },
     /* 2: Conservative */           { 6.0f, 10.0f, 6.0f, 4.5f, 0.025f, 0.010f, 16.0f },
     /* 3: Balanced (default) */     { 4.5f,  7.5f, 4.5f, 3.5f, 0.012f, 0.005f, 12.0f },
-    /* 4: High */                   { 3.5f,  6.0f, 4.0f, 3.2f, 0.006f, 0.002f,  9.0f },
-    /* 5: Max */                    { 2.8f,  5.0f, 3.5f, 2.8f, 0.003f, 0.001f,  7.0f },
+    /* 4: High */                   { 3.2f,  5.5f, 3.8f, 3.0f, 0.005f, 0.002f,  8.0f },
+    /* 5: Max */                    { 2.2f,  3.8f, 2.5f, 2.0f, 0.002f, 0.0005f, 5.5f },
 };
 
 void audio_processor_set_sensitivity(int level)
@@ -338,18 +338,24 @@ bool analyze_harmonics(const float *psd, int n_bins_half, float f0_min_hz, float
     const float h2_local_snr = out->harmonic2_pwr / h2_bg;
     const float h3_local_snr = out->harmonic3_pwr / h3_bg;
 
-    /* Both 2nd and 3rd harmonics must be true narrowband peaks standing out
-     * above their local sidebands AND meet the minimum power ratio to f0. */
+    /* In long-range detection (>20m), high frequencies attenuate rapidly in air.
+     * At sensitivity 5, allow detection if either h2 is confirmed or h3 is confirmed.
+     * At sensitivity 4, require h2 or strong h3.
+     * At sensitivity 1..3, strictly require both h2 and h3. */
     const bool h2_ok = (out->h2_ratio >= prof->min_h2_ratio) && (h2_local_snr >= prof->min_h2_local_snr);
     const bool h3_ok = (out->h3_ratio >= prof->min_h3_ratio) && (h3_local_snr >= prof->min_h3_local_snr);
+    const bool harm_ok = (s_sensitivity_level >= 5) ? (h2_ok || h3_ok) :
+                         (s_sensitivity_level == 4) ? (h2_ok || (h3_ok && f0_local_snr >= 5.5f)) :
+                         (h2_ok && h3_ok);
 
-    if (!h2_ok || !h3_ok) {
+    if (!harm_ok) {
         out->confidence = fminf(0.15f, (f0_local_snr / (prof->snr_norm_scale * 4.f)));
         return false;
     }
 
-    const float harm_prominence = sqrtf((h2_local_snr / prof->min_h2_local_snr) *
-                                        (h3_local_snr / prof->min_h3_local_snr));
+    float h2_factor = fmaxf(1.0f, h2_local_snr / prof->min_h2_local_snr);
+    float h3_factor = fmaxf(1.0f, h3_local_snr / prof->min_h3_local_snr);
+    const float harm_prominence = sqrtf(h2_factor * h3_factor);
     float raw_conf = (f0_local_snr / prof->snr_norm_scale) * fminf(1.8f, 0.35f * harm_prominence);
     out->confidence = fminf(1.0f, fmaxf(0.32f, raw_conf));
     return true;

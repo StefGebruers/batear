@@ -182,56 +182,62 @@ static bool parse_nmea_sentence(char *line, int *consecutive_fixes)
 
     /* Process $GPRMC or $GNRMC */
     if (strcmp(tokens[0], "$GPRMC") == 0 || strcmp(tokens[0], "$GNRMC") == 0) {
-        if (tok_idx >= 10 && tokens[2][0] == 'A') { /* Status 'A' = Valid fix */
-            const char *time_str = tokens[1];
+        const bool valid_pos = (tok_idx >= 10 && tokens[2][0] == 'A');
+        const char *time_str = (tok_idx >= 2) ? tokens[1] : "";
+        const char *date_str = (tok_idx >= 10) ? tokens[9] : "";
+
+        /* Parse date (ddmmyy) and time (hhmmss.ss) */
+        int hour = 0, min = 0, sec = 0;
+        if (strlen(time_str) >= 6) {
+            char tmp[3] = {0};
+            tmp[0] = time_str[0]; tmp[1] = time_str[1]; hour = atoi(tmp);
+            tmp[0] = time_str[2]; tmp[1] = time_str[3]; min  = atoi(tmp);
+            tmp[0] = time_str[4]; tmp[1] = time_str[5]; sec  = atoi(tmp);
+        }
+
+        int day = 0, mon = 0, year = 0;
+        if (strlen(date_str) >= 6) {
+            char tmp[3] = {0};
+            tmp[0] = date_str[0]; tmp[1] = date_str[1]; day  = atoi(tmp);
+            tmp[0] = date_str[2]; tmp[1] = date_str[3]; mon  = atoi(tmp);
+            tmp[0] = date_str[4]; tmp[1] = date_str[5]; year = atoi(tmp) + 2000;
+        }
+
+        /* Synchronize system RTC clock to GPS UTC time as soon as any satellite time arrives */
+        if (year >= 2024 && mon >= 1 && mon <= 12 && day >= 1 && day <= 31) {
+            time_t epoch = date_to_epoch(year, mon, day, hour, min, sec);
+            struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
+            settimeofday(&tv, NULL);
+
+            if (s_gps_mutex && xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                snprintf(s_loc.iso_time, sizeof(s_loc.iso_time),
+                         "%04u-%02u-%02uT%02u:%02u:%02uZ",
+                         (unsigned)year, (unsigned)mon, (unsigned)day,
+                         (unsigned)hour, (unsigned)min, (unsigned)sec);
+                xSemaphoreGive(s_gps_mutex);
+            }
+        }
+
+        if (valid_pos) {
             const char *lat_str  = tokens[3];
             const char lat_dir   = tokens[4][0];
             const char *lon_str  = tokens[5];
             const char lon_dir   = tokens[6][0];
-            const char *date_str = tokens[9];
 
             double lat = nmea_to_decimal(lat_str, lat_dir);
             double lon = nmea_to_decimal(lon_str, lon_dir);
 
-            /* Parse date (ddmmyy) and time (hhmmss.ss) */
-            int hour = 0, min = 0, sec = 0;
-            if (strlen(time_str) >= 6) {
-                char tmp[3] = {0};
-                tmp[0] = time_str[0]; tmp[1] = time_str[1]; hour = atoi(tmp);
-                tmp[0] = time_str[2]; tmp[1] = time_str[3]; min  = atoi(tmp);
-                tmp[0] = time_str[4]; tmp[1] = time_str[5]; sec  = atoi(tmp);
+            if (s_gps_mutex && xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                s_loc.has_fix              = true;
+                s_loc.latitude             = lat;
+                s_loc.longitude            = lon;
+                s_loc.last_fix_timestamp_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
+                xSemaphoreGive(s_gps_mutex);
             }
-
-            int day = 0, mon = 0, year = 0;
-            if (strlen(date_str) >= 6) {
-                char tmp[3] = {0};
-                tmp[0] = date_str[0]; tmp[1] = date_str[1]; day  = atoi(tmp);
-                tmp[0] = date_str[2]; tmp[1] = date_str[3]; mon  = atoi(tmp);
-                tmp[0] = date_str[4]; tmp[1] = date_str[5]; year = atoi(tmp) + 2000;
-            }
-
-            /* Synchronize system RTC clock to GPS UTC time */
-            if (year >= 2024 && mon >= 1 && mon <= 12 && day >= 1 && day <= 31) {
-                time_t epoch = date_to_epoch(year, mon, day, hour, min, sec);
-                struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
-                settimeofday(&tv, NULL);
-
-                if (s_gps_mutex && xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-                    snprintf(s_loc.iso_time, sizeof(s_loc.iso_time),
-                             "%04u-%02u-%02uT%02u:%02u:%02uZ",
-                             (unsigned)year, (unsigned)mon, (unsigned)day,
-                             (unsigned)hour, (unsigned)min, (unsigned)sec);
-                    s_loc.has_fix              = true;
-                    s_loc.latitude             = lat;
-                    s_loc.longitude            = lon;
-                    s_loc.last_fix_timestamp_s = (uint32_t)(esp_timer_get_time() / 1000000LL);
-                    xSemaphoreGive(s_gps_mutex);
-                }
-                (*consecutive_fixes)++;
-                return true;
-            }
+            (*consecutive_fixes)++;
+            return true;
         } else {
-            /* Void fix */
+            /* Void position (searching for satellites) */
             if (s_gps_mutex && xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                 s_loc.has_fix = false;
                 xSemaphoreGive(s_gps_mutex);
@@ -241,15 +247,20 @@ static bool parse_nmea_sentence(char *line, int *consecutive_fixes)
 
     /* Process $GPGGA or $GNGGA */
     if (strcmp(tokens[0], "$GPGGA") == 0 || strcmp(tokens[0], "$GNGGA") == 0) {
+        if (tok_idx >= 8) {
+            int sats = atoi(tokens[7]);
+            if (s_gps_mutex && xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                s_loc.sats = (uint8_t)sats;
+                xSemaphoreGive(s_gps_mutex);
+            }
+        }
         if (tok_idx >= 10) {
             int quality = atoi(tokens[6]);
-            int sats    = atoi(tokens[7]);
             float alt   = (float)atof(tokens[9]);
 
             if (quality > 0) {
                 if (s_gps_mutex && xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                     s_loc.has_fix    = true;
-                    s_loc.sats       = (uint8_t)sats;
                     s_loc.altitude_m = alt;
                     xSemaphoreGive(s_gps_mutex);
                 }
@@ -269,47 +280,71 @@ static void gps_worker_task(void *pvParameters)
 
     load_location_from_nvs();
 
-    uint8_t rx_byte;
+    uint8_t rx_buf[64];
     char line_buf[128];
     int line_pos = 0;
     int consecutive_fixes = 0;
     const int FIXES_BEFORE_SLEEP = 8; /* Wait for 8 consecutive valid fixes (~8 sec) for accuracy */
+    int64_t last_warn_us = 0;
 
     for (;;) {
         /* Check if we were requested to wake up */
         ulTaskNotifyTake(pdTRUE, 0);
 
-        int len = uart_read_bytes(GPS_UART_NUM, &rx_byte, 1, pdMS_TO_TICKS(100));
+        int len = uart_read_bytes(GPS_UART_NUM, rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(50));
         if (len > 0) {
-            if (rx_byte == '$') {
-                line_pos = 0;
-                line_buf[line_pos++] = '$';
-            } else if (line_pos > 0) {
-                if (rx_byte == '\r' || rx_byte == '\n') {
-                    line_buf[line_pos] = '\0';
-                    if (parse_nmea_sentence(line_buf, &consecutive_fixes)) {
-                        if (consecutive_fixes >= FIXES_BEFORE_SLEEP) {
-                            GpsLocation_t cur;
-                            gps_get_location(&cur);
-                            ESP_LOGI(TAG, "3D Fix locked: lat=%.6f lon=%.6f alt=%.1fm sats=%u time=%s",
-                                     cur.latitude, cur.longitude, (double)cur.altitude_m,
-                                     (unsigned)cur.sats, cur.iso_time);
-                            save_location_to_nvs(cur.latitude, cur.longitude, cur.altitude_m);
-
-                            /* Put NEO-6M into sleep mode to preserve battery */
-                            put_neo6m_to_sleep();
-                            consecutive_fixes = 0;
-
-                            /* Sleep for 24 hours unless woken up manually via gps_request_fix() */
-                            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(24ULL * 3600ULL * 1000ULL));
-                            wake_neo6m();
-                        }
-                    }
+            if (s_gps_mutex && xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                s_loc.bytes_rx += (uint32_t)len;
+                xSemaphoreGive(s_gps_mutex);
+            }
+            for (int b = 0; b < len; b++) {
+                char rx_byte = (char)rx_buf[b];
+                if (rx_byte == '$') {
                     line_pos = 0;
-                } else if (line_pos < (int)sizeof(line_buf) - 1) {
-                    line_buf[line_pos++] = (char)rx_byte;
-                } else {
-                    line_pos = 0; /* Buffer overflow guard */
+                    line_buf[line_pos++] = '$';
+                } else if (line_pos > 0) {
+                    if (rx_byte == '\r' || rx_byte == '\n') {
+                        line_buf[line_pos] = '\0';
+                        if (s_gps_mutex && xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                            s_loc.sentences_rx++;
+                            xSemaphoreGive(s_gps_mutex);
+                        }
+                        if (parse_nmea_sentence(line_buf, &consecutive_fixes)) {
+                            if (consecutive_fixes >= FIXES_BEFORE_SLEEP) {
+                                GpsLocation_t cur;
+                                gps_get_location(&cur);
+                                ESP_LOGI(TAG, "3D Fix locked: lat=%.6f lon=%.6f alt=%.1fm sats=%u time=%s",
+                                         cur.latitude, cur.longitude, (double)cur.altitude_m,
+                                         (unsigned)cur.sats, cur.iso_time);
+                                save_location_to_nvs(cur.latitude, cur.longitude, cur.altitude_m);
+
+                                /* Put NEO-6M into sleep mode to preserve battery */
+                                put_neo6m_to_sleep();
+                                consecutive_fixes = 0;
+
+                                /* Sleep for 24 hours unless woken up manually via gps_request_fix() */
+                                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(24ULL * 3600ULL * 1000ULL));
+                                wake_neo6m();
+                            }
+                        }
+                        line_pos = 0;
+                    } else if (line_pos < (int)sizeof(line_buf) - 1) {
+                        line_buf[line_pos++] = rx_byte;
+                    } else {
+                        line_pos = 0; /* Buffer overflow guard */
+                    }
+                }
+            }
+        } else {
+            /* Check if 12 seconds have passed with 0 bytes received */
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - last_warn_us > 12000000LL) {
+                last_warn_us = now_us;
+                GpsLocation_t cur;
+                gps_get_location(&cur);
+                if (cur.bytes_rx == 0 && !cur.is_sleeping) {
+                    ESP_LOGW(TAG, "GPS: 0 bytes received on GPIO 2 (RX). "
+                                  "Check wiring: GPS TX -> Heltec GPIO 2, GPS RX -> Heltec GPIO 3, VCC -> 3V3/5V, GND -> GND.");
                 }
             }
         }

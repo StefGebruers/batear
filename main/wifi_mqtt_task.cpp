@@ -37,6 +37,7 @@
 #include <cmath>
 #include <ctime>
 #include <sys/time.h>
+#include "esp_sntp.h"
 
 static const char *TAG = "wifi_mqtt";
 
@@ -239,6 +240,16 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
         ESP_LOGI(TAG, "WiFi Got IP: %s", s_ip_str);
         xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+
+        static bool s_sntp_started = false;
+        if (!s_sntp_started) {
+            esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+            esp_sntp_setservername(0, "pool.ntp.org");
+            esp_sntp_setservername(1, "time.google.com");
+            esp_sntp_init();
+            s_sntp_started = true;
+            ESP_LOGI(TAG, "SNTP started: syncing real UTC time in background");
+        }
     }
 }
 
@@ -620,15 +631,20 @@ extern "C" void WifiMqttTask(void *pvParameters)
 
             time_t now = time(nullptr);
             char iso_time[32];
-            if (now > 1700000000) {
-                struct tm tinfo;
-                gmtime_r(&now, &tinfo);
+            struct tm tinfo;
+            gmtime_r(&now, &tinfo);
+            if (tinfo.tm_year >= 120) { /* Year >= 2020 */
                 strftime(iso_time, sizeof(iso_time), "%Y-%m-%dT%H:%M:%SZ", &tinfo);
             } else if (loc.iso_time[0]) {
                 strncpy(iso_time, loc.iso_time, sizeof(iso_time) - 1);
                 iso_time[sizeof(iso_time) - 1] = '\0';
             } else {
-                snprintf(iso_time, sizeof(iso_time), "1970-01-01T00:00:00Z");
+                /* When neither NTP nor GPS has set date, format uptime time so it ticks every detection */
+                int64_t up_s = esp_timer_get_time() / 1000000LL;
+                snprintf(iso_time, sizeof(iso_time), "1970-01-01T%02d:%02d:%02dZ",
+                         (int)((up_s / 3600) % 24),
+                         (int)((up_s / 60) % 60),
+                         (int)(up_s % 60));
             }
 
             int64_t ts = (now > 1700000000) ? (int64_t)now : (int64_t)(esp_timer_get_time() / 1000000LL);

@@ -31,6 +31,8 @@ typedef struct {
     char     iso_time[32];         /* "YYYY-MM-DDTHH:MM:SSZ" format from GPS UTC */
     uint32_t last_fix_timestamp_s; /* System uptime (seconds) when last fix occurred */
     bool     is_sleeping;          /* True if NEO-6M is in low-power standby mode */
+    uint32_t bytes_rx;             /* Diagnostic: total raw bytes received from UART */
+    uint32_t sentences_rx;         /* Diagnostic: total NMEA sentences parsed */
 } GpsLocation_t;
 
 /**
