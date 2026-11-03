@@ -30,6 +30,17 @@ void battery_init(void);
  */
 uint32_t battery_read_mv(void);
 
+/*
+ * Convert battery millivolts to percentage (0 - 100%) using a standard
+ * 1S Li-ion/LiPo discharge curve. Returns 0 for voltages below ~3.3V or when 0.
+ */
+uint8_t battery_mv_to_pct(uint32_t mv);
+
+/*
+ * Read battery percentage directly (0 - 100%).
+ */
+uint8_t battery_read_pct(void);
+
 #ifdef __cplusplus
 }
 #endif

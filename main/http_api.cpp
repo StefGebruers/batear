@@ -147,7 +147,7 @@ static esp_err_t handle_status(httpd_req_t *req)
     HttpDroneStatus_t st;
     get_status_snapshot(&st);
 
-    char json[450];
+    char json[512];
     snprintf(json, sizeof(json),
         "{"
             "\"drone_detected\":%s,"
@@ -158,6 +158,8 @@ static esp_err_t handle_status(httpd_req_t *req)
             "\"doa_deg\":%d,"
             "\"doa_elev_deg\":%d,"
             "\"doa_conf\":%.2f,"
+            "\"battery_pct\":%u,"
+            "\"battery_mv\":%u,"
             "\"lat\":%.6f,"
             "\"lon\":%.6f,"
             "\"alt_m\":%.1f,"
@@ -172,6 +174,8 @@ static esp_err_t handle_status(httpd_req_t *req)
         (int)st.doa_deg,
         (int)st.doa_elev_deg,
         (double)st.doa_conf,
+        (unsigned)st.battery_pct,
+        (unsigned)st.battery_mv,
         st.latitude,
         st.longitude,
         (double)st.altitude_m,

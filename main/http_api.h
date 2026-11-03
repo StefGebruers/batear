@@ -28,6 +28,8 @@ typedef struct {
     int16_t  doa_deg;
     int16_t  doa_elev_deg;
     float    doa_conf;
+    uint8_t  battery_pct;
+    uint16_t battery_mv;
     int64_t  timestamp;
     double   latitude;
     double   longitude;

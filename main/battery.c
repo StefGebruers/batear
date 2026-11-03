@@ -168,3 +168,39 @@ void battery_init(void) {}
 uint32_t battery_read_mv(void) { return 0; }
 
 #endif
+
+uint8_t battery_mv_to_pct(uint32_t mv)
+{
+    if (mv < 3000) return 0;
+    if (mv >= 4200) return 100;
+
+    static const struct { uint16_t mv; uint8_t pct; } lut[] = {
+        { 4200, 100 },
+        { 4060,  90 },
+        { 3980,  80 },
+        { 3920,  70 },
+        { 3870,  60 },
+        { 3820,  50 },
+        { 3790,  40 },
+        { 3750,  30 },
+        { 3700,  20 },
+        { 3600,  10 },
+        { 3300,   0 }
+    };
+    const size_t n = sizeof(lut) / sizeof(lut[0]);
+
+    for (size_t i = 0; i < n - 1; i++) {
+        if (mv >= lut[i + 1].mv) {
+            uint32_t span_mv = lut[i].mv - lut[i + 1].mv;
+            uint32_t span_pct = lut[i].pct - lut[i + 1].pct;
+            uint32_t diff = mv - lut[i + 1].mv;
+            return (uint8_t)(lut[i + 1].pct + (diff * span_pct) / span_mv);
+        }
+    }
+    return 0;
+}
+
+uint8_t battery_read_pct(void)
+{
+    return battery_mv_to_pct(battery_read_mv());
+}

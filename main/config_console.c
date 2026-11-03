@@ -19,6 +19,7 @@
 #include "doa_processor.h"
 #include "audio_task.h"
 #include "gps_task.h"
+#include "battery.h"
 #include "sdkconfig.h"
 
 #include "esp_console.h"
@@ -191,6 +192,12 @@ static int cmd_show(int argc, char **argv)
            20.0 * log10((double)audio_processor_get_channel_trim(3)));
     printf("  ambient_rms = %.5f\n",
            (double)audio_processor_get_noise_floor_baseline());
+    uint32_t vbat_mv = battery_read_mv();
+    if (vbat_mv > 0) {
+        printf("\n[battery]  (power status)\n");
+        printf("  voltage     = %lu mV (%.2f V)\n", (unsigned long)vbat_mv, (double)vbat_mv / 1000.0);
+        printf("  percentage  = %u %%\n", (unsigned)battery_mv_to_pct(vbat_mv));
+    }
 #endif
 #ifdef CONFIG_BATEAR_LORA_FREQ
     printf("    lora_freq  = %d kHz\n", CONFIG_BATEAR_LORA_FREQ);

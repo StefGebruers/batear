@@ -370,7 +370,6 @@ static void publish_ha_discovery(void)
             "\"availability_topic\":\"%s\","
             "\"payload_available\":\"online\","
             "\"payload_not_available\":\"offline\","
-            "\"entity_category\":\"diagnostic\","
             "\"device\":{"
                 "\"identifiers\":[\"batear_%s\"]"
             "}"

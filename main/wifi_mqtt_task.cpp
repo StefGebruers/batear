@@ -17,6 +17,7 @@
 #include "pin_config.h"
 #include "lorawan_provision.h"
 #include "oled.h"
+#include "battery.h"
 #include "sdkconfig.h"
 #include "gps_task.h"
 
@@ -426,7 +427,6 @@ static void publish_ha_discovery(void)
             "\"availability_topic\":\"%s\","
             "\"payload_available\":\"online\","
             "\"payload_not_available\":\"offline\","
-            "\"entity_category\":\"diagnostic\","
             "\"device\":{\"identifiers\":[\"batear_%s\"]}"
         "}",
         s_device_id, s_device_id,
@@ -589,11 +589,57 @@ static void publish_ha_discovery(void)
         s_device_id);
     esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
 
+    /* Battery percentage sensor (diagnostic) */
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/batear_%s/battery/config", s_device_id);
+    snprintf(payload, sizeof(payload),
+        "{"
+            "\"name\":\"Batear %s Battery\","
+            "\"unique_id\":\"batear_%s_battery\","
+            "\"device_class\":\"battery\","
+            "\"unit_of_measurement\":\"%%\","
+            "\"state_topic\":\"%s\","
+            "\"value_template\":\"{{ value_json.battery_pct if value_json.battery_pct is defined else 0 }}\","
+            "\"availability_topic\":\"%s\","
+            "\"payload_available\":\"online\","
+            "\"payload_not_available\":\"offline\","
+            "\"entity_category\":\"diagnostic\","
+            "\"device\":{\"identifiers\":[\"batear_%s\"]}"
+        "}",
+        s_device_id, s_device_id,
+        s_topic_status, s_topic_avail,
+        s_device_id);
+    esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+
+    /* Battery voltage sensor (diagnostic) */
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/batear_%s/battery_mv/config", s_device_id);
+    snprintf(payload, sizeof(payload),
+        "{"
+            "\"name\":\"Batear %s Battery Voltage\","
+            "\"unique_id\":\"batear_%s_battery_mv\","
+            "\"device_class\":\"voltage\","
+            "\"unit_of_measurement\":\"V\","
+            "\"state_topic\":\"%s\","
+            "\"value_template\":\"{{ (value_json.battery_mv / 1000) | round(2) if value_json.battery_mv is defined else 0 }}\","
+            "\"availability_topic\":\"%s\","
+            "\"payload_available\":\"online\","
+            "\"payload_not_available\":\"offline\","
+            "\"entity_category\":\"diagnostic\","
+            "\"device\":{\"identifiers\":[\"batear_%s\"]}"
+        "}",
+        s_device_id, s_device_id,
+        s_topic_status, s_topic_avail,
+        s_device_id);
+    esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+
     /* Initial idle state so Home Assistant entities initialize immediately */
-    char init_json[450];
+    char init_json[512];
     uint8_t det_id = lorawan_get_keys()->device_id;
     GpsLocation_t init_loc;
     gps_get_location(&init_loc);
+    uint32_t vbat_mv = battery_read_mv();
+    uint8_t vbat_pct = battery_mv_to_pct(vbat_mv);
     snprintf(init_json, sizeof(init_json),
         "{"
             "\"drone_detected\":false,"
@@ -605,6 +651,8 @@ static void publish_ha_discovery(void)
             "\"doa_deg\":-1,"
             "\"doa_elev_deg\":-1,"
             "\"doa_cardinal\":\"N/A\","
+            "\"battery_pct\":%u,"
+            "\"battery_mv\":%u,"
             "\"lat\":%.6f,"
             "\"lon\":%.6f,"
             "\"alt_m\":%.1f,"
@@ -612,6 +660,8 @@ static void publish_ha_discovery(void)
             "\"timestamp\":0"
         "}",
         (unsigned)det_id,
+        (unsigned)vbat_pct,
+        (unsigned)vbat_mv,
         init_loc.latitude, init_loc.longitude, (double)init_loc.altitude_m,
         init_loc.iso_time[0] ? init_loc.iso_time : "1970-01-01T00:00:00Z");
     esp_mqtt_client_publish(s_mqtt, s_topic_status, init_json, 0, 1, 1);
@@ -677,6 +727,7 @@ extern "C" void WifiMqttTask(void *pvParameters)
     ESP_LOGI(TAG, "WifiMqttTask start (core %d)", xPortGetCoreID());
 
     hw_display_init();
+    battery_init();
     load_config();
 
     if (wifi_init_sta()) {
@@ -685,10 +736,11 @@ extern "C" void WifiMqttTask(void *pvParameters)
     }
 
     DroneEvent_t ev;
-    char json[450];
+    char json[512];
     uint16_t tx_seq = 1;
     bool in_alarm = false;
     int64_t last_alarm_time_us = 0;
+    int64_t last_telemetry_time_us = esp_timer_get_time();
 
     hw_display_idle();
 
@@ -705,6 +757,8 @@ extern "C" void WifiMqttTask(void *pvParameters)
 
             GpsLocation_t loc;
             gps_get_location(&loc);
+            uint32_t vbat_mv = battery_read_mv();
+            uint8_t vbat_pct = battery_mv_to_pct(vbat_mv);
 
             time_t now = time(nullptr);
             char iso_time[32];
@@ -736,6 +790,8 @@ extern "C" void WifiMqttTask(void *pvParameters)
                 .doa_deg        = ev.doa_deg,
                 .doa_elev_deg   = ev.doa_elev_deg,
                 .doa_conf       = ev.doa_conf,
+                .battery_pct    = vbat_pct,
+                .battery_mv     = static_cast<uint16_t>(vbat_mv),
                 .timestamp      = ts,
                 .latitude       = loc.latitude,
                 .longitude      = loc.longitude,
@@ -761,6 +817,8 @@ extern "C" void WifiMqttTask(void *pvParameters)
                     "\"doa_deg\":%d,"
                     "\"doa_elev_deg\":%d,"
                     "\"doa_cardinal\":\"%s\","
+                    "\"battery_pct\":%u,"
+                    "\"battery_mv\":%u,"
                     "\"lat\":%.6f,"
                     "\"lon\":%.6f,"
                     "\"alt_m\":%.1f,"
@@ -775,15 +833,19 @@ extern "C" void WifiMqttTask(void *pvParameters)
                 (int)ev.doa_deg,
                 (int)ev.doa_elev_deg,
                 doa_angle_to_cardinal(ev.doa_deg, ev.active_mics),
+                (unsigned)vbat_pct,
+                (unsigned)vbat_mv,
                 loc.latitude, loc.longitude, (double)loc.altitude_m,
                 iso_time,
                 (long long)ts);
 
             esp_mqtt_client_publish(s_mqtt, s_topic_status, json, 0, 1, 1);
             ESP_LOGI(TAG, "pub → %s : %s", s_topic_status, json);
+            last_telemetry_time_us = esp_timer_get_time();
         } else {
             /* 1000ms timeout with no new events: keep display fresh */
-            if (in_alarm && (esp_timer_get_time() - last_alarm_time_us) > 4000000LL) {
+            int64_t now_us = esp_timer_get_time();
+            if (in_alarm && (now_us - last_alarm_time_us) > 4000000LL) {
                 in_alarm = false;
 #if defined(PIN_LED)
                 gpio_set_level((gpio_num_t)PIN_LED, 0);
@@ -791,6 +853,64 @@ extern "C" void WifiMqttTask(void *pvParameters)
             }
             if (!in_alarm) {
                 hw_display_idle();
+
+                /* Periodic idle telemetry heartbeat (every 60s) for battery & GPS diagnostics */
+                if (s_mqtt_connected && (now_us - last_telemetry_time_us) >= 60000000LL) {
+                    last_telemetry_time_us = now_us;
+                    GpsLocation_t loc;
+                    gps_get_location(&loc);
+                    uint32_t vbat_mv = battery_read_mv();
+                    uint8_t vbat_pct = battery_mv_to_pct(vbat_mv);
+
+                    time_t now = time(nullptr);
+                    char iso_time[32];
+                    struct tm tinfo;
+                    gmtime_r(&now, &tinfo);
+                    if (tinfo.tm_year >= 120) {
+                        strftime(iso_time, sizeof(iso_time), "%Y-%m-%dT%H:%M:%SZ", &tinfo);
+                    } else if (loc.iso_time[0]) {
+                        strncpy(iso_time, loc.iso_time, sizeof(iso_time) - 1);
+                        iso_time[sizeof(iso_time) - 1] = '\0';
+                    } else {
+                        int64_t up_s = now_us / 1000000LL;
+                        snprintf(iso_time, sizeof(iso_time), "1970-01-01T%02d:%02d:%02dZ",
+                                 (int)((up_s / 3600) % 24),
+                                 (int)((up_s / 60) % 60),
+                                 (int)(up_s % 60));
+                    }
+                    int64_t ts = (now > 1700000000) ? (int64_t)now : (int64_t)(now_us / 1000000LL);
+                    uint8_t det_id = lorawan_get_keys()->device_id;
+
+                    snprintf(json, sizeof(json),
+                        "{"
+                            "\"drone_detected\":false,"
+                            "\"detector_id\":%u,"
+                            "\"rms_db\":0,"
+                            "\"f0_bin\":0,"
+                            "\"seq\":%u,"
+                            "\"confidence\":0.0000,"
+                            "\"doa_deg\":-1,"
+                            "\"doa_elev_deg\":-1,"
+                            "\"doa_cardinal\":\"N/A\","
+                            "\"battery_pct\":%u,"
+                            "\"battery_mv\":%u,"
+                            "\"lat\":%.6f,"
+                            "\"lon\":%.6f,"
+                            "\"alt_m\":%.1f,"
+                            "\"timestamp_iso\":\"%s\","
+                            "\"timestamp\":%lld"
+                        "}",
+                        (unsigned)det_id,
+                        (unsigned)tx_seq++,
+                        (unsigned)vbat_pct,
+                        (unsigned)vbat_mv,
+                        loc.latitude, loc.longitude, (double)loc.altitude_m,
+                        iso_time,
+                        (long long)ts);
+
+                    esp_mqtt_client_publish(s_mqtt, s_topic_status, json, 0, 1, 1);
+                    ESP_LOGI(TAG, "heartbeat pub → %s : %s", s_topic_status, json);
+                }
             }
         }
     }

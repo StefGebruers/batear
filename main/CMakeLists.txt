@@ -24,11 +24,11 @@ endif()
 
 if(CONFIG_BATEAR_ROLE_WIRED_DETECTOR)
     list(APPEND SRCS "audio_task.c" "audio_processor.c" "eth_mqtt_task.cpp" "http_api.cpp"
-                     "tf_recorder.c" "manual_capture.c" "ntp_time.c")
+                     "tf_recorder.c" "manual_capture.c" "ntp_time.c" "battery.c")
 endif()
 
 if(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
-    list(APPEND SRCS "audio_task.c" "audio_processor.c" "oled.c" "wifi_mqtt_task.cpp" "http_api.cpp")
+    list(APPEND SRCS "audio_task.c" "audio_processor.c" "oled.c" "wifi_mqtt_task.cpp" "http_api.cpp" "battery.c")
 endif()
 
 set(PRIV_DEPS
