@@ -32,7 +32,7 @@ typedef struct {
     double   latitude;
     double   longitude;
     float    altitude_m;
-    char     iso_time[24];
+    char     iso_time[32];
 } HttpDroneStatus_t;
 
 /* Update the shared status (called from EthMqttTask main loop) */

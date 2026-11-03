@@ -35,6 +35,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <ctime>
+#include <sys/time.h>
 
 static const char *TAG = "wifi_mqtt";
 

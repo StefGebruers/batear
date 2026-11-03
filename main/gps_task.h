@@ -28,7 +28,7 @@ typedef struct {
     double   longitude;            /* Decimal degrees (-180.0 .. +180.0) */
     float    altitude_m;           /* Altitude above mean sea level in meters */
     uint8_t  sats;                 /* Number of satellites used in fix */
-    char     iso_time[24];         /* "YYYY-MM-DDTHH:MM:SSZ" format from GPS UTC */
+    char     iso_time[32];         /* "YYYY-MM-DDTHH:MM:SSZ" format from GPS UTC */
     uint32_t last_fix_timestamp_s; /* System uptime (seconds) when last fix occurred */
     bool     is_sleeping;          /* True if NEO-6M is in low-power standby mode */
 } GpsLocation_t;
@@ -53,3 +53,4 @@ void gps_request_fix(void);
 #ifdef __cplusplus
 }
 #endif
+

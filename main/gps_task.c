@@ -218,8 +218,9 @@ static bool parse_nmea_sentence(char *line, int *consecutive_fixes)
 
                 if (s_gps_mutex && xSemaphoreTake(s_gps_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
                     snprintf(s_loc.iso_time, sizeof(s_loc.iso_time),
-                             "%04d-%02d-%02dT%02d:%02d:%02dZ",
-                             year, mon, day, hour, min, sec);
+                             "%04u-%02u-%02uT%02u:%02u:%02uZ",
+                             (unsigned)year, (unsigned)mon, (unsigned)day,
+                             (unsigned)hour, (unsigned)min, (unsigned)sec);
                     s_loc.has_fix              = true;
                     s_loc.latitude             = lat;
                     s_loc.longitude            = lon;
@@ -379,3 +380,4 @@ void gps_request_fix(void)
         xTaskNotifyGive(s_gps_task_h);
     }
 }
+
