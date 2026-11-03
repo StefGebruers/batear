@@ -73,7 +73,7 @@ def main() -> int:
             esc_pass = wifi_pass.replace('"', '\\"')
             send_cmd(ser, f'set wifi_ssid "{esc_ssid}"')
             send_cmd(ser, f'set wifi_pass "{esc_pass}"')
-            send_cmd(ser, 'set mqtt_url "mqtt://192.168.1.142:1883"')
+            send_cmd(ser, 'set mqtt_url "mqtt://192.168.1.76:1883"')
             if mqtt_user:
                 esc_muser = mqtt_user.replace('"', '\\"')
                 esc_mpass = mqtt_pass.replace('"', '\\"')

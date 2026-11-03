@@ -413,7 +413,7 @@ static int cmd_set(int argc, char **argv)
 #if defined(CONFIG_BATEAR_ROLE_GATEWAY) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
         printf("  wifi_ssid   — Wi-Fi SSID\n");
         printf("  wifi_pass   — Wi-Fi password\n");
-        printf("  mqtt_url    — e.g. mqtt://192.168.1.142:1883\n");
+        printf("  mqtt_url    — e.g. mqtt://192.168.1.76:1883\n");
         printf("  mqtt_user   — MQTT username\n");
         printf("  mqtt_pass   — MQTT password\n");
         printf("  mqtt_device_id — node ID for MQTT topics\n");
