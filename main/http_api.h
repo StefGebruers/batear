@@ -29,6 +29,10 @@ typedef struct {
     int16_t  doa_elev_deg;
     float    doa_conf;
     int64_t  timestamp;
+    double   latitude;
+    double   longitude;
+    float    altitude_m;
+    char     iso_time[24];
 } HttpDroneStatus_t;
 
 /* Update the shared status (called from EthMqttTask main loop) */

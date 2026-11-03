@@ -18,6 +18,7 @@
 #include "lorawan_provision.h"
 #include "oled.h"
 #include "sdkconfig.h"
+#include "gps_task.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -153,7 +154,12 @@ static void hw_display_event(const DroneEvent_t *ev)
                      doa_angle_to_cardinal(ev->doa_deg, ev->active_mics));
         }
     } else {
-        snprintf(line, sizeof(line), "IP:%.15s", s_ip_str);
+        GpsLocation_t loc;
+        if (gps_get_location(&loc) && loc.has_fix) {
+            snprintf(line, sizeof(line), "IP:%.9s G:FIX%u", s_ip_str, (unsigned)loc.sats);
+        } else {
+            snprintf(line, sizeof(line), "IP:%.15s", s_ip_str);
+        }
     }
     oled_print(0, 6, line);
     oled_flush();
@@ -412,9 +418,97 @@ static void publish_ha_discovery(void)
 
     esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
 
+    /* Latitude sensor */
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/batear_%s/latitude/config", s_device_id);
+    snprintf(payload, sizeof(payload),
+        "{"
+            "\"name\":\"Batear %s Latitude\","
+            "\"unique_id\":\"batear_%s_lat\","
+            "\"unit_of_measurement\":\"°\","
+            "\"icon\":\"mdi:crosshairs-gps\","
+            "\"state_topic\":\"%s\","
+            "\"value_template\":\"{{ value_json.lat if value_json.lat is defined else 0 }}\","
+            "\"availability_topic\":\"%s\","
+            "\"payload_available\":\"online\","
+            "\"payload_not_available\":\"offline\","
+            "\"entity_category\":\"diagnostic\","
+            "\"device\":{\"identifiers\":[\"batear_%s\"]}"
+        "}",
+        s_device_id, s_device_id,
+        s_topic_status, s_topic_avail,
+        s_device_id);
+    esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+
+    /* Longitude sensor */
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/batear_%s/longitude/config", s_device_id);
+    snprintf(payload, sizeof(payload),
+        "{"
+            "\"name\":\"Batear %s Longitude\","
+            "\"unique_id\":\"batear_%s_lon\","
+            "\"unit_of_measurement\":\"°\","
+            "\"icon\":\"mdi:crosshairs-gps\","
+            "\"state_topic\":\"%s\","
+            "\"value_template\":\"{{ value_json.lon if value_json.lon is defined else 0 }}\","
+            "\"availability_topic\":\"%s\","
+            "\"payload_available\":\"online\","
+            "\"payload_not_available\":\"offline\","
+            "\"entity_category\":\"diagnostic\","
+            "\"device\":{\"identifiers\":[\"batear_%s\"]}"
+        "}",
+        s_device_id, s_device_id,
+        s_topic_status, s_topic_avail,
+        s_device_id);
+    esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+
+    /* Altitude sensor */
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/batear_%s/altitude/config", s_device_id);
+    snprintf(payload, sizeof(payload),
+        "{"
+            "\"name\":\"Batear %s Altitude\","
+            "\"unique_id\":\"batear_%s_alt\","
+            "\"unit_of_measurement\":\"m\","
+            "\"icon\":\"mdi:elevation-rise\","
+            "\"state_topic\":\"%s\","
+            "\"value_template\":\"{{ value_json.alt_m if value_json.alt_m is defined else 0 }}\","
+            "\"availability_topic\":\"%s\","
+            "\"payload_available\":\"online\","
+            "\"payload_not_available\":\"offline\","
+            "\"entity_category\":\"diagnostic\","
+            "\"device\":{\"identifiers\":[\"batear_%s\"]}"
+        "}",
+        s_device_id, s_device_id,
+        s_topic_status, s_topic_avail,
+        s_device_id);
+    esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+
+    /* Real UTC Timestamp ISO sensor */
+    snprintf(topic, sizeof(topic),
+             "homeassistant/sensor/batear_%s/timestamp/config", s_device_id);
+    snprintf(payload, sizeof(payload),
+        "{"
+            "\"name\":\"Batear %s Time\","
+            "\"unique_id\":\"batear_%s_timestamp\","
+            "\"icon\":\"mdi:clock-outline\","
+            "\"state_topic\":\"%s\","
+            "\"value_template\":\"{{ value_json.timestamp_iso }}\","
+            "\"availability_topic\":\"%s\","
+            "\"payload_available\":\"online\","
+            "\"payload_not_available\":\"offline\","
+            "\"device\":{\"identifiers\":[\"batear_%s\"]}"
+        "}",
+        s_device_id, s_device_id,
+        s_topic_status, s_topic_avail,
+        s_device_id);
+    esp_mqtt_client_publish(s_mqtt, topic, payload, 0, 1, 1);
+
     /* Initial idle state so Home Assistant entities initialize immediately */
-    char init_json[360];
+    char init_json[450];
     uint8_t det_id = lorawan_get_keys()->device_id;
+    GpsLocation_t init_loc;
+    gps_get_location(&init_loc);
     snprintf(init_json, sizeof(init_json),
         "{"
             "\"drone_detected\":false,"
@@ -426,9 +520,15 @@ static void publish_ha_discovery(void)
             "\"doa_deg\":-1,"
             "\"doa_elev_deg\":-1,"
             "\"doa_cardinal\":\"N/A\","
+            "\"lat\":%.6f,"
+            "\"lon\":%.6f,"
+            "\"alt_m\":%.1f,"
+            "\"timestamp_iso\":\"%s\","
             "\"timestamp\":0"
         "}",
-        (unsigned)det_id);
+        (unsigned)det_id,
+        init_loc.latitude, init_loc.longitude, (double)init_loc.altitude_m,
+        init_loc.iso_time[0] ? init_loc.iso_time : "1970-01-01T00:00:00Z");
     esp_mqtt_client_publish(s_mqtt, s_topic_status, init_json, 0, 1, 1);
 }
 
@@ -506,14 +606,30 @@ extern "C" void WifiMqttTask(void *pvParameters)
     }
 
     DroneEvent_t ev;
-    char json[320];
+    char json[450];
     uint16_t tx_seq = 1;
 
     for (;;) {
         if (xQueueReceive(g_drone_event_queue, &ev, pdMS_TO_TICKS(5000)) == pdTRUE) {
             hw_display_event(&ev);
 
-            int64_t ts = esp_timer_get_time() / 1000000LL;
+            GpsLocation_t loc;
+            gps_get_location(&loc);
+
+            time_t now = time(nullptr);
+            char iso_time[32];
+            if (now > 1700000000) {
+                struct tm tinfo;
+                gmtime_r(&now, &tinfo);
+                strftime(iso_time, sizeof(iso_time), "%Y-%m-%dT%H:%M:%SZ", &tinfo);
+            } else if (loc.iso_time[0]) {
+                strncpy(iso_time, loc.iso_time, sizeof(iso_time) - 1);
+                iso_time[sizeof(iso_time) - 1] = '\0';
+            } else {
+                snprintf(iso_time, sizeof(iso_time), "1970-01-01T00:00:00Z");
+            }
+
+            int64_t ts = (now > 1700000000) ? (int64_t)now : (int64_t)(esp_timer_get_time() / 1000000LL);
             uint8_t det_id = lorawan_get_keys()->device_id;
 
             HttpDroneStatus_t hst = {
@@ -526,7 +642,12 @@ extern "C" void WifiMqttTask(void *pvParameters)
                 .doa_elev_deg   = ev.doa_elev_deg,
                 .doa_conf       = ev.doa_conf,
                 .timestamp      = ts,
+                .latitude       = loc.latitude,
+                .longitude      = loc.longitude,
+                .altitude_m     = loc.altitude_m,
+                .iso_time       = {0},
             };
+            strncpy(hst.iso_time, iso_time, sizeof(hst.iso_time) - 1);
             http_api_update_status(&hst);
 
             if (!s_mqtt_connected) {
@@ -545,6 +666,10 @@ extern "C" void WifiMqttTask(void *pvParameters)
                     "\"doa_deg\":%d,"
                     "\"doa_elev_deg\":%d,"
                     "\"doa_cardinal\":\"%s\","
+                    "\"lat\":%.6f,"
+                    "\"lon\":%.6f,"
+                    "\"alt_m\":%.1f,"
+                    "\"timestamp_iso\":\"%s\","
                     "\"timestamp\":%lld"
                 "}",
                 (ev.type == DRONE_EVENT_ALARM) ? "true" : "false",
@@ -555,6 +680,8 @@ extern "C" void WifiMqttTask(void *pvParameters)
                 (int)ev.doa_deg,
                 (int)ev.doa_elev_deg,
                 doa_angle_to_cardinal(ev.doa_deg, ev.active_mics),
+                loc.latitude, loc.longitude, (double)loc.altitude_m,
+                iso_time,
                 (long long)ts);
 
             esp_mqtt_client_publish(s_mqtt, s_topic_status, json, 0, 1, 1);

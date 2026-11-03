@@ -44,6 +44,8 @@ esp_err_t doa_processor_init(void);
 void      doa_processor_deinit(void);
 void      doa_processor_set_spacing_mm(float spacing_mm);
 float     doa_processor_get_spacing_mm(void);
+void      doa_processor_set_north_offset_deg(float offset_deg);
+float     doa_processor_get_north_offset_deg(void);
 
 esp_err_t doa_processor_estimate(const int32_t * const pcm_ch[],
                                  int num_mics,

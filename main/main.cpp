@@ -26,6 +26,7 @@
 
 #include "lorawan_provision.h"
 #include "config_console.h"
+#include "gps_task.h"
 
 #ifdef CONFIG_BATEAR_ROLE_DETECTOR
 #include "drone_detector.h"
@@ -76,6 +77,7 @@ extern "C" void app_main(void)
     lorawan_log_keys(TAG);
 
     config_console_init();
+    gps_task_init();
 
 #ifdef CONFIG_BATEAR_ROLE_DETECTOR
 

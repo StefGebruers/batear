@@ -147,7 +147,7 @@ static esp_err_t handle_status(httpd_req_t *req)
     HttpDroneStatus_t st;
     get_status_snapshot(&st);
 
-    char json[360];
+    char json[450];
     snprintf(json, sizeof(json),
         "{"
             "\"drone_detected\":%s,"
@@ -158,6 +158,10 @@ static esp_err_t handle_status(httpd_req_t *req)
             "\"doa_deg\":%d,"
             "\"doa_elev_deg\":%d,"
             "\"doa_conf\":%.2f,"
+            "\"lat\":%.6f,"
+            "\"lon\":%.6f,"
+            "\"alt_m\":%.1f,"
+            "\"timestamp_iso\":\"%s\","
             "\"timestamp\":%lld"
         "}",
         st.drone_detected ? "true" : "false",
@@ -168,6 +172,10 @@ static esp_err_t handle_status(httpd_req_t *req)
         (int)st.doa_deg,
         (int)st.doa_elev_deg,
         (double)st.doa_conf,
+        st.latitude,
+        st.longitude,
+        (double)st.altitude_m,
+        st.iso_time[0] ? st.iso_time : "1970-01-01T00:00:00Z",
         (long long)st.timestamp);
 
     httpd_resp_set_type(req, "application/json");

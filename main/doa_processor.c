@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
+#include "nvs.h"
 
 static const char *TAG = "doa";
 
@@ -45,6 +46,7 @@ static float s_ema_sin        = 0.0f;
 static float s_ema_cos        = 1.0f;
 static float s_ema_elev_deg   = 0.0f;
 static float s_mic_spacing_mm = 83.0f; /* Default: 83 mm (distance between opposite mics N-Z and O-W) */
+static float s_north_offset_deg = 0.0f; /* True North offset in degrees: true_az = (meas_az + offset) % 360 */
 
 esp_err_t doa_processor_init(void)
 {
@@ -52,7 +54,18 @@ esp_err_t doa_processor_init(void)
     s_ema_sin      = 0.0f;
     s_ema_cos      = 1.0f;
     s_ema_elev_deg = 0.0f;
-    ESP_LOGI(TAG, "DoA processor initialized (spacing=%.0f mm)", (double)s_mic_spacing_mm);
+
+    nvs_handle_t h;
+    if (nvs_open("lora_cfg", NVS_READONLY, &h) == ESP_OK) {
+        uint16_t off = 0;
+        if (nvs_get_u16(h, "north_offset", &off) == ESP_OK) {
+            s_north_offset_deg = (float)(off % 360);
+        }
+        nvs_close(h);
+    }
+
+    ESP_LOGI(TAG, "DoA processor initialized (spacing=%.0f mm, north_offset=%.0f deg)",
+             (double)s_mic_spacing_mm, (double)s_north_offset_deg);
     return ESP_OK;
 }
 
@@ -72,6 +85,19 @@ void doa_processor_set_spacing_mm(float spacing_mm)
 float doa_processor_get_spacing_mm(void)
 {
     return s_mic_spacing_mm;
+}
+
+void doa_processor_set_north_offset_deg(float offset_deg)
+{
+    while (offset_deg >= 360.0f) offset_deg -= 360.0f;
+    while (offset_deg < 0.0f)    offset_deg += 360.0f;
+    s_north_offset_deg = offset_deg;
+    ESP_LOGI(TAG, "True North offset set to %.0f deg", (double)s_north_offset_deg);
+}
+
+float doa_processor_get_north_offset_deg(void)
+{
+    return s_north_offset_deg;
 }
 
 const char *doa_angle_to_cardinal(int16_t deg, int active_mics)
@@ -470,8 +496,13 @@ esp_err_t doa_processor_estimate(const int32_t * const pcm_ch[],
         smooth_az = (smooth_az > 270.0f) ? 0.0f : 180.0f;
     }
 
+    /* Apply true North alignment offset */
+    float true_az = smooth_az + s_north_offset_deg;
+    while (true_az >= 360.0f) true_az -= 360.0f;
+    while (true_az < 0.0f)    true_az += 360.0f;
+
     out->valid         = true;
-    out->azimuth_deg   = smooth_az;
+    out->azimuth_deg   = true_az;
     out->elevation_deg = (active_mics == 4) ? s_ema_elev_deg : (float)DOA_INVALID_DEG;
     out->confidence    = coherence;
     return ESP_OK;

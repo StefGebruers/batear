@@ -296,6 +296,10 @@ void AudioTask(void *pvParameters)
             if (nvs_get_u16(h, "mic_spacing", &spacing) == ESP_OK) {
                 doa_processor_set_spacing_mm((float)spacing);
             }
+            uint16_t n_off = 0;
+            if (nvs_get_u16(h, "north_offset", &n_off) == ESP_OK) {
+                doa_processor_set_north_offset_deg((float)n_off);
+            }
             nvs_close(h);
         }
     }

@@ -17,6 +17,7 @@
 #include "config_console.h"
 #include "audio_processor.h"
 #include "doa_processor.h"
+#include "gps_task.h"
 #include "sdkconfig.h"
 
 #include "esp_console.h"
@@ -171,6 +172,8 @@ static int cmd_show(int argc, char **argv)
            (double)audio_processor_get_gain());
     printf("    mic_spacing = %.0f mm (active, distance between Left & Right mic)\n",
            (double)doa_processor_get_spacing_mm());
+    printf("    north_offset= %.0f deg (active, true North alignment)\n",
+           (double)doa_processor_get_north_offset_deg());
 #endif
 #ifdef CONFIG_BATEAR_LORA_FREQ
     printf("    lora_freq  = %d kHz\n", CONFIG_BATEAR_LORA_FREQ);
@@ -255,6 +258,17 @@ static int cmd_show(int argc, char **argv)
     printf("    mqtt_url   = %s\n", CONFIG_BATEAR_MQTT_BROKER_URL);
     printf("    device_id  = %s\n", CONFIG_BATEAR_WIFI_DEVICE_ID);
 #endif
+
+    GpsLocation_t loc;
+    if (gps_get_location(&loc)) {
+        printf("\n[gps]  (location & UTC time)\n");
+        printf("  fix          = %s\n", loc.has_fix ? "3D FIX (Live)" : "NVS (Restored)");
+        printf("  power        = %s\n", loc.is_sleeping ? "SLEEP (<0.5 mA)" : "ACTIVE (~50 mA)");
+        printf("  lat / lon    = %.6f, %.6f\n", loc.latitude, loc.longitude);
+        printf("  alt_m        = %.1f m\n", (double)loc.altitude_m);
+        printf("  sats         = %u\n", (unsigned)loc.sats);
+        printf("  utc_time     = %s\n", loc.iso_time[0] ? loc.iso_time : "(not synced)");
+    }
 
     printf("\n");
     return 0;
@@ -376,6 +390,7 @@ static int cmd_set(int argc, char **argv)
         printf("  sensitivity — 1..5 (1=Strict, 3=Balanced [default], 5=Max; applies immediately)\n");
         printf("  mic_gain    — 1..32 (digital pre-gain; 2=default; applies immediately)\n");
         printf("  mic_spacing — 20..500 (distance between 2 mics in mm; default 100; applies immediately)\n");
+        printf("  north_offset— 0..359 (degrees from Mic 0 to true North; default 0; applies immediately)\n");
         printf("  debug       — 0 or 1 (toggle 1Hz audio debug log; default 0=quiet)\n");
 #endif
 #if defined(CONFIG_BATEAR_ROLE_GATEWAY) || defined(CONFIG_BATEAR_ROLE_WIFI_DETECTOR)
@@ -479,6 +494,22 @@ static int cmd_set(int argc, char **argv)
         printf("OK: lora_cfg:mic_spacing = %d mm (applied immediately)\n", mm);
         return 0;
     }
+    if (strcmp(key, "north_offset") == 0) {
+        int off = atoi(value);
+        if (off < 0 || off > 359) {
+            printf("Error: north_offset must be 0..359 (degrees from Mic 0 to true North)\n");
+            return 1;
+        }
+        doa_processor_set_north_offset_deg((float)off);
+        nvs_handle_t h;
+        if (nvs_open("lora_cfg", NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_u16(h, "north_offset", (uint16_t)off);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        printf("OK: lora_cfg:north_offset = %d deg (applied immediately to DoA)\n", off);
+        return 0;
+    }
     if (strcmp(key, "debug") == 0) {
         int d = atoi(value);
         audio_processor_set_debug_log(d != 0);
@@ -556,6 +587,31 @@ static int cmd_reboot(int argc, char **argv)
 }
 
 /* ================================================================
+ * "gps" command
+ * ================================================================ */
+
+static int cmd_gps(int argc, char **argv)
+{
+    GpsLocation_t loc;
+    bool has_data = gps_get_location(&loc);
+    if (argc > 1 && (strcmp(argv[1], "fix") == 0 || strcmp(argv[1], "wake") == 0)) {
+        printf("Waking GPS module to acquire fresh 3D fix...\n");
+        gps_request_fix();
+        return 0;
+    }
+    printf("\n--- GPS Status ---\n");
+    printf("  Fix:        %s\n", loc.has_fix ? "3D FIX (Live)" : (has_data ? "Restored from NVS (No active fix)" : "No Fix"));
+    printf("  Power mode: %s\n", loc.is_sleeping ? "SLEEP (<0.5 mA)" : "ACTIVE (~50 mA acquiring)");
+    printf("  Satellites: %u\n", (unsigned)loc.sats);
+    printf("  Latitude:   %.6f\n", loc.latitude);
+    printf("  Longitude:  %.6f\n", loc.longitude);
+    printf("  Altitude:   %.1f m\n", (double)loc.altitude_m);
+    printf("  UTC Time:   %s\n", loc.iso_time[0] ? loc.iso_time : "(not synchronized)");
+    printf("\nUse 'gps fix' to wake GPS and acquire a fresh fix.\n\n");
+    return 0;
+}
+
+/* ================================================================
  * Console initialisation
  * ================================================================ */
 
@@ -599,6 +655,14 @@ void config_console_init(void)
         .func = cmd_reboot,
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&reboot_cmd));
+
+    const esp_console_cmd_t gps_cmd = {
+        .command = "gps",
+        .help = "Show GPS location/fix status, or 'gps fix' to wake and refresh",
+        .hint = "[fix]",
+        .func = cmd_gps,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&gps_cmd));
 
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
     ESP_LOGI(TAG, "Console ready — type 'help' for commands");
