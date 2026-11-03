@@ -130,13 +130,45 @@ void audio_processor_deinit(void)
     dsps_fft2r_deinit_fc32();
 }
 
+static float s_channel_trim[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+static float s_noise_floor_baseline = 0.0003f;
+
+void audio_processor_set_channel_trim(int ch, float trim)
+{
+    if (ch >= 0 && ch < 4) {
+        if (trim < 0.10f) trim = 0.10f;
+        if (trim > 10.0f) trim = 10.0f;
+        s_channel_trim[ch] = trim;
+    }
+}
+
+float audio_processor_get_channel_trim(int ch)
+{
+    if (ch >= 0 && ch < 4) {
+        return s_channel_trim[ch];
+    }
+    return 1.0f;
+}
+
+void audio_processor_set_noise_floor_baseline(float rms)
+{
+    if (rms > 0.0f) {
+        s_noise_floor_baseline = rms;
+    }
+}
+
+float audio_processor_get_noise_floor_baseline(void)
+{
+    return s_noise_floor_baseline;
+}
+
 // cppcheck-suppress unusedFunction
 const float *audio_processor_window(void)
 {
     return s_window;
 }
 
-float audio_processor_prepare_fft_input(float *fft_io, const int32_t *pcm, int n_samples)
+float audio_processor_prepare_fft_input_ch(float *fft_io, const int32_t *pcm, int n_samples, int ch)
 {
     if (fft_io == NULL || pcm == NULL || n_samples != AUDIO_PROC_FFT_SIZE) {
         return 0.f;
@@ -151,9 +183,10 @@ float audio_processor_prepare_fft_input(float *fft_io, const int32_t *pcm, int n
     }
     const float dc_mean = (float)(dc_sum / (double)AUDIO_PROC_FFT_SIZE);
 
-    /* Step 2: Subtract DC, apply digital pre-gain, and apply Hanning window */
+    /* Step 2: Subtract DC, apply digital pre-gain and channel calibration trim, and apply Hanning window */
     double sum_sq = 0.0;
-    const float gain = s_mic_gain;
+    const float trim = (ch >= 0 && ch < 4) ? s_channel_trim[ch] : 1.0f;
+    const float gain = s_mic_gain * trim;
 
     for (int i = 0; i < AUDIO_PROC_FFT_SIZE; i++) {
         float x = ((float)pcm[i] * inv_full_scale - dc_mean) * gain;
@@ -167,6 +200,11 @@ float audio_processor_prepare_fft_input(float *fft_io, const int32_t *pcm, int n
 
     s_last_rms = (float)sqrt(sum_sq / (double)AUDIO_PROC_FFT_SIZE);
     return s_last_rms;
+}
+
+float audio_processor_prepare_fft_input(float *fft_io, const int32_t *pcm, int n_samples)
+{
+    return audio_processor_prepare_fft_input_ch(fft_io, pcm, n_samples, 0);
 }
 
 esp_err_t audio_processor_fft_forward(float *fft_io)
@@ -193,13 +231,13 @@ void audio_processor_psd_from_fft(const float *fft_complex, float *psd_out)
     }
 }
 
-esp_err_t audio_processor_compute_psd(float *fft_work, const int32_t *pcm, int n_samples)
+esp_err_t audio_processor_compute_psd_ch(float *fft_work, const int32_t *pcm, int n_samples, int ch)
 {
     if (fft_work == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     if (pcm != NULL) {
-        audio_processor_prepare_fft_input(fft_work, pcm, n_samples);
+        audio_processor_prepare_fft_input_ch(fft_work, pcm, n_samples, ch);
     }
     esp_err_t err = audio_processor_fft_forward(fft_work);
     if (err != ESP_OK) {
@@ -207,6 +245,11 @@ esp_err_t audio_processor_compute_psd(float *fft_work, const int32_t *pcm, int n
     }
     audio_processor_psd_from_fft(fft_work, s_psd);
     return ESP_OK;
+}
+
+esp_err_t audio_processor_compute_psd(float *fft_work, const int32_t *pcm, int n_samples)
+{
+    return audio_processor_compute_psd_ch(fft_work, pcm, n_samples, 0);
 }
 
 const float *audio_processor_last_psd(void)

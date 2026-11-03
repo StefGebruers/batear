@@ -122,11 +122,12 @@ const char *doa_angle_to_cardinal(int16_t deg, int active_mics)
     return DIRS_NL[idx & 7];
 }
 
-static float prepare_channel_fft(float *fft_io, const int32_t *pcm, int n_samples)
+static float prepare_channel_fft(float *fft_io, const int32_t *pcm, int n_samples, int ch)
 {
     const float inv_full_scale = 1.f / 2147483648.f;
     const float *win = audio_processor_window();
-    const float gain = audio_processor_get_gain();
+    const float trim = audio_processor_get_channel_trim(ch);
+    const float gain = audio_processor_get_gain() * trim;
 
     double dc_sum = 0.0;
     for (int i = 0; i < n_samples; i++) {
@@ -259,7 +260,7 @@ esp_err_t doa_processor_estimate(const int32_t * const pcm_ch[],
         if (pcm_ch[m] == NULL) {
             continue;
         }
-        out->rms_ch[m] = prepare_channel_fft(s_fft_ch[m], pcm_ch[m], AUDIO_PROC_FFT_SIZE);
+        out->rms_ch[m] = prepare_channel_fft(s_fft_ch[m], pcm_ch[m], AUDIO_PROC_FFT_SIZE, m);
         if (out->rms_ch[m] >= DOA_MIN_CHAN_RMS) {
             if (audio_processor_fft_forward(s_fft_ch[m]) == ESP_OK && valid_mics == m) {
                 valid_mics++;

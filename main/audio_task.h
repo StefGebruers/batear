@@ -14,6 +14,9 @@ extern "C" {
  */
 void AudioTask(void *pvParameters);
 
+/** Request a 4-mic sensitivity recalibration in the running AudioTask. */
+void audio_task_request_recalibration(void);
+
 #ifdef __cplusplus
 }
 #endif

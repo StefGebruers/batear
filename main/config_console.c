@@ -17,6 +17,7 @@
 #include "config_console.h"
 #include "audio_processor.h"
 #include "doa_processor.h"
+#include "audio_task.h"
 #include "gps_task.h"
 #include "sdkconfig.h"
 
@@ -30,6 +31,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <math.h>
 
 static const char *TAG = "console";
 
@@ -174,6 +176,21 @@ static int cmd_show(int argc, char **argv)
            (double)doa_processor_get_spacing_mm());
     printf("    north_offset= %.0f deg (active, true North alignment)\n",
            (double)doa_processor_get_north_offset_deg());
+    printf("\n[mic_cal]  (microphone calibration & ambient baseline)\n");
+    printf("  Mic0 Noord:  trim = %.2fx (%+.1f dB)\n",
+           (double)audio_processor_get_channel_trim(0),
+           20.0 * log10((double)audio_processor_get_channel_trim(0)));
+    printf("  Mic1 Zuid:   trim = %.2fx (%+.1f dB)\n",
+           (double)audio_processor_get_channel_trim(1),
+           20.0 * log10((double)audio_processor_get_channel_trim(1)));
+    printf("  Mic2 Oost:   trim = %.2fx (%+.1f dB)\n",
+           (double)audio_processor_get_channel_trim(2),
+           20.0 * log10((double)audio_processor_get_channel_trim(2)));
+    printf("  Mic3 West:   trim = %.2fx (%+.1f dB)\n",
+           (double)audio_processor_get_channel_trim(3),
+           20.0 * log10((double)audio_processor_get_channel_trim(3)));
+    printf("  ambient_rms = %.5f\n",
+           (double)audio_processor_get_noise_floor_baseline());
 #endif
 #ifdef CONFIG_BATEAR_LORA_FREQ
     printf("    lora_freq  = %d kHz\n", CONFIG_BATEAR_LORA_FREQ);
@@ -619,6 +636,32 @@ static int cmd_gps(int argc, char **argv)
     return 0;
 }
 
+static int cmd_cal(int argc, char **argv)
+{
+    if (argc >= 2 && (strcmp(argv[1], "run") == 0 || strcmp(argv[1], "start") == 0)) {
+        printf("Requesting microphone re-calibration (2.0s measurement in AudioTask)...\n");
+        audio_task_request_recalibration();
+        return 0;
+    }
+    printf("\n--- Microphone Calibration Status ---\n");
+    printf("  Mic 0 (Noord, GPIO6/GND): trim=%.2fx (%+.1f dB)\n",
+           (double)audio_processor_get_channel_trim(0),
+           20.0 * log10((double)audio_processor_get_channel_trim(0)));
+    printf("  Mic 1 (Zuid,  GPIO6/3V3): trim=%.2fx (%+.1f dB)\n",
+           (double)audio_processor_get_channel_trim(1),
+           20.0 * log10((double)audio_processor_get_channel_trim(1)));
+    printf("  Mic 2 (Oost,  GPIO7/GND): trim=%.2fx (%+.1f dB)\n",
+           (double)audio_processor_get_channel_trim(2),
+           20.0 * log10((double)audio_processor_get_channel_trim(2)));
+    printf("  Mic 3 (West,  GPIO7/3V3): trim=%.2fx (%+.1f dB)\n",
+           (double)audio_processor_get_channel_trim(3),
+           20.0 * log10((double)audio_processor_get_channel_trim(3)));
+    printf("  Ambient noise baseline:   rms=%.5f\n",
+           (double)audio_processor_get_noise_floor_baseline());
+    printf("\nType 'cal run' to re-calibrate in the current environment.\n\n");
+    return 0;
+}
+
 /* ================================================================
  * Console initialisation
  * ================================================================ */
@@ -671,6 +714,14 @@ void config_console_init(void)
         .func = cmd_gps,
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&gps_cmd));
+
+    const esp_console_cmd_t cal_cmd = {
+        .command = "cal",
+        .help = "Show microphone calibration trims or trigger new measurement ('cal run')",
+        .hint = "[run]",
+        .func = cmd_cal,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&cal_cmd));
 
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
     ESP_LOGI(TAG, "Console ready — type 'help' for commands");

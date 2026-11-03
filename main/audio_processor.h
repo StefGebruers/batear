@@ -69,6 +69,13 @@ void audio_processor_psd_from_fft(const float *fft_complex, float *psd_out);
  * If pcm is NULL, expects fft_io already filled (e.g. unit test).
  */
 esp_err_t audio_processor_compute_psd(float *fft_work, const int32_t *pcm, int n_samples);
+esp_err_t audio_processor_compute_psd_ch(float *fft_work, const int32_t *pcm, int n_samples, int ch);
+
+/** Channel trim multipliers (default 1.0f). Used for microphone gain balancing. */
+void  audio_processor_set_channel_trim(int ch, float trim);
+float audio_processor_get_channel_trim(int ch);
+void  audio_processor_set_noise_floor_baseline(float rms);
+float audio_processor_get_noise_floor_baseline(void);
 
 const float *audio_processor_last_psd(void);
 float        audio_processor_last_rms(void);
