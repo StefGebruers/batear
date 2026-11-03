@@ -204,16 +204,19 @@ static bool read_pcm_chunk_bytes(i2s_chan_handle_t chan, uint8_t *dst, size_t ne
 
 /**
  * Sanitize raw 32-bit I2S slot word from 24-bit MEMS microphones (INMP441 / ICS-43434):
- *   1. Sign-extend from bit 28 into bits [31:29]:
- *      When two INMP441s share one SD line, the first MSB clock edge after the
- *      8-bit High-Z tri-state gap can retain the bus pull state (1 or 0), causing
- *      full-scale 0x80000000 spikes (RMS ~0.578 or ~0.044) on zero-crossings.
- *      Bits [28:8] are 100% settled and preserve full dynamic range up to 102 dB SPL.
+ *   1. Sign-extend from bit 30 into bit 31 (`<< 1 >> 1`):
+ *      When two INMP441s share one SD line, the very first MSB clock edge (bit 31)
+ *      after the 8-bit High-Z tri-state gap can retain the bus pull state (0 or 1),
+ *      causing full-scale 0x80000000 spikes on zero-crossings.
+ *      Unlike `<< 7 >> 5` (which integer-overflowed whenever a mic's normal 1-3%
+ *      factory DC offset crossed 0.78% of full scale, causing a constant 0.0247
+ *      wrap-around floor!), `<< 1 >> 1` preserves the full +/- 50% dynamic range
+ *      (up to 114 dB SPL) without ever wrapping around on DC offset.
  *   2. Mask off bits [7:0], which are High-Z tri-state padding after the 24-bit word.
  */
 static inline int32_t sanitize_i2s_24bit_sample(int32_t raw)
 {
-    int32_t s = ((int32_t)((uint32_t)raw << 7)) >> 5;
+    int32_t s = ((int32_t)((uint32_t)raw << 1)) >> 1;
     return s & ~0xFF;
 }
 
@@ -365,7 +368,37 @@ void AudioTask(void *pvParameters)
         }
 
         const float *psd = audio_processor_last_psd();
-        const float rms  = audio_processor_last_rms();
+        float rms  = audio_processor_last_rms();
+        const int32_t *pcm_ch[4] = { s_raw, s_raw_right, s_raw_ch2, s_raw_ch3 };
+
+        HarmonicAnalysisResult hr;
+#if CONFIG_BATEAR_AUDIO_PERF_LOG
+        const int64_t t_harm_start = esp_timer_get_time();
+#endif
+        bool harm_ok =
+            analyze_harmonics(psd, AUDIO_PROC_PSD_BINS, HARM_F0_MIN_HZ, HARM_F0_MAX_HZ, &hr);
+        /* Evaluate all 4 microphones (Noord, Zuid, Oost, West) and select the channel
+         * with the strongest harmonic drone signature so a shadowed or noisy mic wire
+         * never degrades detection confidence compared to a 1-mic or 2-mic setup. */
+        for (int ch = 1; ch < 4; ch++) {
+            if (audio_processor_compute_psd(s_fft_work, pcm_ch[ch], FRAME_SAMPLES) == ESP_OK) {
+                const float ch_rms = audio_processor_last_rms();
+                if (ch_rms > rms) {
+                    rms = ch_rms;
+                }
+                if (ch_rms >= RMS_MIN) {
+                    HarmonicAnalysisResult hr_ch;
+                    const float *psd_ch = audio_processor_last_psd();
+                    bool ok_ch = analyze_harmonics(psd_ch, AUDIO_PROC_PSD_BINS,
+                                                   HARM_F0_MIN_HZ, HARM_F0_MAX_HZ, &hr_ch);
+                    if ((ok_ch && !harm_ok) ||
+                        (ok_ch == harm_ok && hr_ch.confidence > hr.confidence)) {
+                        hr      = hr_ch;
+                        harm_ok = ok_ch;
+                    }
+                }
+            }
+        }
 
         frames_total++;
         if ((frames_total % 300) == 0) {
@@ -398,26 +431,6 @@ void AudioTask(void *pvParameters)
             } else {
                 silent_streak = 0;
                 restart_tried = false;  /* re-arm for the next event */
-            }
-        }
-
-        HarmonicAnalysisResult hr;
-#if CONFIG_BATEAR_AUDIO_PERF_LOG
-        const int64_t t_harm_start = esp_timer_get_time();
-#endif
-        bool harm_ok =
-            analyze_harmonics(psd, AUDIO_PROC_PSD_BINS, HARM_F0_MIN_HZ, HARM_F0_MAX_HZ, &hr);
-        if (!harm_ok) {
-            /* Also check orthogonal cross arm (Mic 2 Oost) if Mic 0 Noord missed */
-            HarmonicAnalysisResult hr_orth;
-            if (audio_processor_compute_psd(s_fft_work, s_raw_ch2, FRAME_SAMPLES) == ESP_OK) {
-                const float *psd_orth = audio_processor_last_psd();
-                bool ok_orth = analyze_harmonics(psd_orth, AUDIO_PROC_PSD_BINS,
-                                                 HARM_F0_MIN_HZ, HARM_F0_MAX_HZ, &hr_orth);
-                if (ok_orth || hr_orth.confidence > hr.confidence) {
-                    hr      = hr_orth;
-                    harm_ok = ok_orth;
-                }
             }
         }
 #if CONFIG_BATEAR_AUDIO_PERF_LOG
@@ -460,7 +473,6 @@ void AudioTask(void *pvParameters)
         const int64_t now_us = esp_timer_get_time();
 
         DoaResult doa_res = {0};
-        const int32_t *pcm_ch[4] = { s_raw, s_raw_right, s_raw_ch2, s_raw_ch3 };
         doa_processor_estimate(pcm_ch, 4, doa_processor_get_spacing_mm(),
                                hr.fundamental_bin, &doa_res);
         const int16_t doa_deg      = doa_res.valid ? (int16_t)lrintf(doa_res.azimuth_deg) : -1;

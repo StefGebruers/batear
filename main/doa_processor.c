@@ -9,6 +9,7 @@
 #include "doa_processor.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
 
@@ -32,6 +33,9 @@ static const char *TAG = "doa";
 
 /* Working FFT buffers for up to 4 channels (interleaved complex float: 2 * 1024 floats each) */
 static float __attribute__((aligned(16))) s_fft_ch[DOA_MAX_MICS][2 * AUDIO_PROC_FFT_SIZE];
+
+/* Per-channel harmonic tonal quality weight (0.15 .. 1.0) so clean mics dominate over noisy wires */
+static float s_ch_quality[DOA_MAX_MICS];
 
 /* Precomputed 1D GCC-PHAT curve per microphone pair for ultra-fast 2D (Azimuth x Elevation) search */
 static float s_gcc_lut[6][DOA_TAU_LUT_SIZE];
@@ -253,6 +257,33 @@ esp_err_t doa_processor_estimate(const int32_t * const pcm_ch[],
     const float d_m = spacing * 0.001f;
     const float r_m = 0.5f * d_m;
 
+    /* Compute per-channel tonal SNR quality at f0 (or across 140..1200 Hz) so that
+     * if one microphone wire has bus noise, clean microphone pairs dominate GCC-PHAT. */
+    for (int m = 0; m < active_mics; m++) {
+        float sig_p = 0.0f;
+        float tot_p = 1e-12f;
+        const int k_min = (int)(120.0f / AUDIO_PROC_BIN_HZ);
+        const int k_max = (int)(1800.0f / AUDIO_PROC_BIN_HZ);
+        for (int k = k_min; k < k_max; k++) {
+            float re = s_fft_ch[m][2 * k];
+            float im = s_fft_ch[m][2 * k + 1];
+            float p  = re * re + im * im;
+            tot_p += p;
+            if (f0_bin >= k_min &&
+                (abs(k - f0_bin) <= 2 || abs(k - 2 * f0_bin) <= 2 || abs(k - 3 * f0_bin) <= 2)) {
+                sig_p += p;
+            } else if (f0_bin < k_min && p > sig_p) {
+                sig_p = p;
+            }
+        }
+        float ratio = sig_p / tot_p;
+        /* Clamp channel quality weight between 0.15 and 1.0 */
+        float q = sqrtf(ratio * 8.0f);
+        if (q < 0.15f) q = 0.15f;
+        if (q > 1.00f) q = 1.00f;
+        s_ch_quality[m] = q;
+    }
+
     /* Microphone coordinates in meters:
      * 4-mic cross ("kruisverband"):
      *   Mic 0 (GPIO6, SEL=GND): Noord / Voor   (+r,  0) -> Azimuth 0°
@@ -302,9 +333,10 @@ esp_err_t doa_processor_estimate(const int32_t * const pcm_ch[],
                 const float g_im = xp_im * xq_re - xp_re * xq_im;
                 const float mag  = sqrtf(g_re * g_re + g_im * g_im) + 1e-12f;
 
-                /* Weighted PHAT: unit phase vector scaled by bin SNR weight */
-                phat_re[n_pairs][b] = (g_re / mag) * bin_weights[b];
-                phat_im[n_pairs][b] = (g_im / mag) * bin_weights[b];
+                /* Weighted PHAT: unit phase vector scaled by bin SNR weight and pair channel quality */
+                const float pair_q = s_ch_quality[p] * s_ch_quality[q];
+                phat_re[n_pairs][b] = (g_re / mag) * bin_weights[b] * pair_q;
+                phat_im[n_pairs][b] = (g_im / mag) * bin_weights[b] * pair_q;
             }
             n_pairs++;
         }
